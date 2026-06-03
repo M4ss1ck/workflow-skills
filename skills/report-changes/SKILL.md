@@ -39,6 +39,9 @@ Authentication
 Wiring
 - The new routes were registered in the app factory and secrets were moved to environment config.
 
+## Pairing at the end of a task
+When wrapping up a task, you can pair this with propose-commit-message: give this change report first, then a proposed commit message.
+
 ## Common Mistakes
 - Running git commands and re-analyzing the diff from scratch instead of reporting from session memory — this loses the "why" and wastes effort.
 - Forcing a large change into one flat list until it becomes unreadable — switch to headed groups.

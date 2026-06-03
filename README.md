@@ -10,6 +10,7 @@ This repo is both a Claude Code **plugin** and its own **marketplace**, so it in
 |-------|--------------|
 | [report-changes](skills/report-changes/SKILL.md) | Generates a concise, flat-bullet report of the code changes made in a session — for PRs, commit messages, or handoff. |
 | [keep-plans-local](skills/keep-plans-local/SKILL.md) | Keeps plans, specs, and working notes as disposable local-only guidance under `docs/plans/`, out of git — overriding skills that would commit them. |
+| [propose-commit-message](skills/propose-commit-message/SKILL.md) | Proposes a Conventional Commits message for the current work (staged changes if any) without committing. Pairs with report-changes at the end of a task. |
 
 ## Install
 
