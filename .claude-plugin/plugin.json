@@ -1,0 +1,9 @@
+{
+  "name": "workflow-skills",
+  "description": "Personal collection of agent skills for day-to-day programming workflows.",
+  "version": "0.1.0",
+  "author": {
+    "name": "massick",
+    "email": "4ndyraul@gmail.com"
+  }
+}

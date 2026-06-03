@@ -1,0 +1,8 @@
+# OS / editor cruft
+.DS_Store
+*.swp
+*~
+
+# Local design/planning artifacts (kept local, never committed)
+docs/superpowers/specs/
+docs/superpowers/plans/

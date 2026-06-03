@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "workflow-skills",
+  "description": "Personal collection of agent skills for day-to-day programming workflows.",
+  "owner": {
+    "name": "massick",
+    "email": "4ndyraul@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "workflow-skills",
+      "source": "./",
+      "description": "Personal collection of agent skills for day-to-day programming workflows.",
+      "category": "development"
+    }
+  ]
+}
