@@ -64,7 +64,7 @@ scripts/install.sh --list-agents
 
 ## Adding a skill
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). In short: copy [templates/SKILL.md](templates/SKILL.md) into `skills/<name>/SKILL.md`, fill it in, and run `scripts/lint-skills.sh`.
+See [CONTRIBUTING.md](CONTRIBUTING.md). In short: copy [templates/skill-template.md](templates/skill-template.md) into `skills/<name>/SKILL.md`, fill it in, and run `scripts/lint-skills.sh`.
 
 ## Layout
 

@@ -8,7 +8,7 @@ This repo collects small, single-purpose agent skills. Here is how to add one.
 
    ```bash
    mkdir -p skills/<name>
-   cp templates/SKILL.md skills/<name>/SKILL.md
+   cp templates/skill-template.md skills/<name>/SKILL.md
    ```
 
 2. Fill in `skills/<name>/SKILL.md`:

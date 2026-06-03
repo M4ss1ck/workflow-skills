@@ -11,6 +11,17 @@ if [ ! -d "$skills_dir" ]; then
   exit 1
 fi
 
+while IFS= read -r file; do
+  case "$file" in
+    "$skills_dir"/*/SKILL.md)
+      ;;
+    *)
+      echo "FAIL  ${file#$repo_root/}: SKILL.md outside skills/ is installable"
+      status=1
+      ;;
+  esac
+done < <(find "$repo_root" -path "$repo_root/.git" -prune -o -name SKILL.md -type f -print)
+
 found=0
 for dir in "$skills_dir"/*/; do
   [ -d "$dir" ] || continue

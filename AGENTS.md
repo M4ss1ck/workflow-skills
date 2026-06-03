@@ -27,7 +27,7 @@ The body holds the instructions the agent follows when the skill is active. Keep
 - One skill = one clear purpose. If a skill tries to do two things, split it.
 - The directory name and frontmatter `name` must match.
 - Keep skills self-contained: reference supporting files by relative path inside the skill directory.
-- Match the tone and structure of existing skills; use `templates/SKILL.md` as the starting point.
+- Match the tone and structure of existing skills; use `templates/skill-template.md` as the starting point.
 
 ## Before you finish
 
