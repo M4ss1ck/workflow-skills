@@ -12,13 +12,18 @@ argument-hint: 'Optional: scope or format preferences for the report'
 - When generating notes for a PR, commit message, or handoff
 
 ## Procedure
-1. Review all files changed in the current session (use git diff or session context)
-2. Identify the thought process: why each change was made, what drove decisions
-3. Produce a bullet list following the output rules below
+1. Draw on the current session as the primary source: what was changed and, just as importantly, why — the decisions made, problems hit, and alternatives rejected.
+2. Use `git diff`/`git status` only to confirm the file list and catch anything the session missed. Do not re-review the diff as if seeing it for the first time or re-derive intent from the code; the reasoning already lives in the session.
+3. Choose the format that fits the size of the change (see Output Rules), then write the report.
 
 ## Output Rules
-- Use a flat bullet list only — no bold text, no section headers, no nested lists
-- Write in passive voice ("X was added", "Y was updated")
-- Keep each bullet to one simple sentence
-- Order bullets by logical flow (setup/context first, then implementation, then wiring)
-- Include both what was changed and why, but stay concise
+- Capture both what changed and why, giving the reasoning equal weight to the change itself.
+- Write in passive voice ("X was added", "Y was updated"), one idea per bullet, concise and correct.
+- Order by logical flow: setup/context first, then implementation, then wiring.
+- Small or medium changes: a single flat bullet list — no headings, no nesting.
+- Large changes: group bullets under short headings so the report stays scannable. Add structure only where it aids clarity, never at the expense of simplicity or conciseness.
+
+## Common Mistakes
+- Running git commands and re-analyzing the diff from scratch instead of reporting from session memory — this loses the "why" and wastes effort.
+- Forcing a large change into one flat list until it becomes unreadable — switch to headed groups.
+- Padding a small change with structure or detail it does not need.
