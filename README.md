@@ -1,8 +1,8 @@
 # workflow-skills
 
-A personal collection of [agent skills](https://docs.claude.com/en/docs/claude-code/skills) for day-to-day programming workflows. Each skill is a small, self-contained instruction set an AI coding agent loads on demand.
+A personal collection of agent skills for day-to-day programming workflows. Each skill is a small, self-contained instruction set an AI coding agent loads on demand.
 
-This repo is both a Claude Code **plugin** and its own **marketplace**, so it installs through the official `/plugin` flow. The same `skills/` directory is portable to other agents (Codex, Gemini) that read skills from a directory.
+The `skills/` directory is the source of truth and follows the open `SKILL.md` layout used by Claude Code, Codex, Gemini CLI, OpenCode, Antigravity, and similar tools. This repo also includes Claude Code and Codex plugin metadata for agents that prefer plugin installation.
 
 ## Skills
 
@@ -14,24 +14,52 @@ This repo is both a Claude Code **plugin** and its own **marketplace**, so it in
 
 ## Install
 
-### As a Claude Code plugin (recommended)
+### Cross-agent with the skills CLI (recommended)
+
+Use the `skills` CLI when you want the repo installed into every supported agent it detects:
+
+```bash
+npx skills add https://github.com/M4ss1ck/workflow-skills.git --skill '*' --all
+```
+
+For local development from a clone:
+
+```bash
+npx skills add . --skill '*' --all
+```
+
+You can target individual agents:
+
+```bash
+npx skills add . -g -a claude-code -a codex -a gemini-cli -a opencode --skill '*'
+```
+
+### Claude Code plugin
 
 ```
-/plugin marketplace add <this-repo-url>
+/plugin marketplace add https://github.com/M4ss1ck/workflow-skills.git
 /plugin install workflow-skills@workflow-skills
 ```
 
-### Manual / cross-agent
+### Codex plugin
 
-Clone the repo and run the installer. By default it **symlinks** each skill into `~/.claude/skills`, so edits in the repo take effect immediately.
+Codex can install this repo as a plugin through the `.codex-plugin/plugin.json` manifest. For local testing, the repo also includes a repo-scoped marketplace at `.agents/plugins/marketplace.json`; restart Codex from this repo and open `/plugins` to browse the `workflow-skills` marketplace.
+
+### Local symlink installer
+
+Clone the repo and run the installer when you want direct symlinks into known agent skill directories. By default it **symlinks** each skill into `~/.claude/skills`, so edits in the repo take effect immediately.
 
 ```bash
-git clone <this-repo-url>
+git clone https://github.com/M4ss1ck/workflow-skills.git
 cd workflow-skills
-scripts/install.sh            # ~/.claude/skills (default)
-scripts/install.sh --agents   # ~/.agents/skills (Codex / agent-agnostic)
-scripts/install.sh --copy     # copy instead of symlink
-scripts/install.sh --dir PATH # custom skills directory
+scripts/install.sh                  # ~/.claude/skills (default)
+scripts/install.sh --agent codex    # ~/.agents/skills and ~/.codex/skills
+scripts/install.sh --agent gemini   # ~/.gemini/skills
+scripts/install.sh --agent opencode # ~/.config/opencode/skills
+scripts/install.sh --all            # every known target
+scripts/install.sh --copy           # copy instead of symlink
+scripts/install.sh --dir PATH       # custom skills directory
+scripts/install.sh --list-agents
 ```
 
 ## Adding a skill
@@ -42,6 +70,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). In short: copy [templates/SKILL.md](temp
 
 ```
 .claude-plugin/    plugin.json + marketplace.json (install metadata)
+.codex-plugin/     Codex plugin manifest
+.agents/plugins/   repo-scoped Codex marketplace
 skills/            one directory per skill, each with a SKILL.md
 templates/         skeleton for authoring new skills
 scripts/           install.sh, lint-skills.sh

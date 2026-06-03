@@ -9,5 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test installer
+        run: bash scripts/test-install.sh
+      - name: Test skill linter
+        run: bash scripts/test-lint-skills.sh
       - name: Lint skills
         run: bash scripts/lint-skills.sh

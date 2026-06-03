@@ -4,7 +4,13 @@ Guidance for AI agents working in this repository. This is the single source of 
 
 ## What this repo is
 
-A collection of agent skills. Each skill is a directory under `skills/` containing a `SKILL.md` (and any supporting files the skill references). The repo doubles as a Claude Code plugin and marketplace — see `.claude-plugin/`.
+A collection of agent skills. Each skill is a directory under `skills/` containing a `SKILL.md` (and any supporting files the skill references). The repo is meant to stay portable across skills-compatible agents: Claude Code, Codex, Gemini CLI, OpenCode, Antigravity, and similar tools.
+
+The repo also includes tool-specific distribution metadata:
+
+- Claude Code plugin and marketplace metadata under `.claude-plugin/`.
+- Codex plugin metadata under `.codex-plugin/`.
+- Repo-scoped Codex marketplace metadata under `.agents/plugins/`.
 
 ## Anatomy of a skill
 
@@ -33,6 +39,18 @@ bash scripts/lint-skills.sh
 
 It verifies every skill has a `SKILL.md` beginning with frontmatter that defines a non-empty `name` and `description`.
 
+Run the installer tests when changing `scripts/install.sh`:
+
+```bash
+bash scripts/test-install.sh
+```
+
+Run the linter tests when changing `scripts/lint-skills.sh`:
+
+```bash
+bash scripts/test-lint-skills.sh
+```
+
 ## Planning artifacts
 
 Design docs and implementation plans stay local under `docs/plans/` (git-ignored). Do not commit intermediate planning files; commit finished work.
@@ -48,3 +66,25 @@ This repo is both a Claude Code plugin (`.claude-plugin/plugin.json`) and its ow
 
 - Invoke a skill with the `Skill` tool; never `Read` a `SKILL.md` to "use" it.
 - Skills are read when loaded, not live — after editing one, reload it before relying on the change.
+
+## Codex specifics
+
+Codex reads the plugin manifest at `.codex-plugin/plugin.json`, which points at `./skills/`. It can also discover the repo-scoped marketplace at `.agents/plugins/marketplace.json` when Codex is launched from this repository.
+
+Codex local skill discovery also supports symlinked skills. Use:
+
+```bash
+bash scripts/install.sh --agent codex
+```
+
+That installs into both `~/.agents/skills` and `~/.codex/skills` for broad compatibility.
+
+## Cross-agent installer
+
+Prefer the `skills` CLI for public cross-agent install instructions:
+
+```bash
+npx skills add https://github.com/M4ss1ck/workflow-skills.git --skill '*' --all
+```
+
+Keep `scripts/install.sh` as the local development helper for direct symlinks or copies. Use `bash scripts/install.sh --list-agents` to see supported local targets.

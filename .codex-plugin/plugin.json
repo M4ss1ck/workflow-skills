@@ -1,0 +1,33 @@
+{
+  "name": "workflow-skills",
+  "version": "0.1.0",
+  "description": "Personal collection of agent skills for day-to-day programming workflows.",
+  "author": {
+    "name": "massick",
+    "email": "4ndyraul@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "skills",
+    "workflow",
+    "codex",
+    "agents"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Workflow Skills",
+    "shortDescription": "Personal workflow skills for coding agents.",
+    "longDescription": "Reusable skills for reporting changes, keeping plans local, and proposing commit messages across agent coding workflows.",
+    "developerName": "massick",
+    "category": "Productivity",
+    "capabilities": [
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Report the changes from this session.",
+      "Propose a commit message.",
+      "Keep this implementation plan local."
+    ],
+    "brandColor": "#3B82F6"
+  }
+}

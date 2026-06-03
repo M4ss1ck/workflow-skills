@@ -17,6 +17,7 @@ for dir in "$skills_dir"/*/; do
   found=1
   name="$(basename "$dir")"
   file="$dir/SKILL.md"
+  skill_status=0
 
   if [ ! -f "$file" ]; then
     echo "FAIL  $name: missing SKILL.md"
@@ -33,15 +34,29 @@ for dir in "$skills_dir"/*/; do
 
   # Extract the frontmatter block (between the first two '---' lines).
   frontmatter="$(awk 'NR==1{next} /^---[[:space:]]*$/{exit} {print}' "$file")"
+  declared_name="$(printf '%s\n' "$frontmatter" | awk -F: '/^name:[[:space:]]*/ {sub(/^[[:space:]]+/, "", $2); sub(/[[:space:]]+$/, "", $2); gsub(/^'\''|'\''$/, "", $2); gsub(/^"|"$/, "", $2); print $2; exit}')"
 
   for key in name description; do
     if ! printf '%s\n' "$frontmatter" | grep -Eq "^${key}:[[:space:]]*\S"; then
       echo "FAIL  $name: frontmatter missing non-empty '${key}'"
       status=1
+      skill_status=1
     fi
   done
 
-  if [ "$status" -eq 0 ]; then
+  if ! printf '%s\n' "$name" | grep -Eq '^[a-z0-9]+(-[a-z0-9]+)*$'; then
+    echo "FAIL  $name: name must be kebab-case"
+    status=1
+    skill_status=1
+  fi
+
+  if [ -n "$declared_name" ] && [ "$declared_name" != "$name" ]; then
+    echo "FAIL  $name: frontmatter name must match directory"
+    status=1
+    skill_status=1
+  fi
+
+  if [ "$skill_status" -eq 0 ]; then
     echo "ok    $name"
   fi
 done
