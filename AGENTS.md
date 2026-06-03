@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for AI agents working in this repository. Tool-agnostic; Claude Code specifics live in [CLAUDE.md](CLAUDE.md).
+Guidance for AI agents working in this repository. This is the single source of truth; `CLAUDE.md` just points here.
 
 ## What this repo is
 
@@ -36,3 +36,15 @@ It verifies every skill has a `SKILL.md` beginning with frontmatter that defines
 ## Planning artifacts
 
 Design docs and implementation plans stay local under `docs/superpowers/` (git-ignored). Do not commit intermediate planning files; commit finished work.
+
+## Claude Code specifics
+
+This repo is both a Claude Code plugin (`.claude-plugin/plugin.json`) and its own marketplace (`.claude-plugin/marketplace.json`, `"source": "./"`), so it installs from itself:
+
+```
+/plugin marketplace add /home/massick/Trabajo/ai/workflow-skills
+/plugin install workflow-skills@workflow-skills
+```
+
+- Invoke a skill with the `Skill` tool; never `Read` a `SKILL.md` to "use" it.
+- Skills are read when loaded, not live — after editing one, reload it before relying on the change.
