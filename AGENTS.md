@@ -35,7 +35,7 @@ It verifies every skill has a `SKILL.md` beginning with frontmatter that defines
 
 ## Planning artifacts
 
-Design docs and implementation plans stay local under `docs/superpowers/` (git-ignored). Do not commit intermediate planning files; commit finished work.
+Design docs and implementation plans stay local under `docs/plans/` (git-ignored). Do not commit intermediate planning files; commit finished work.
 
 ## Claude Code specifics
 

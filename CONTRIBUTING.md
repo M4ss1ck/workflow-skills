@@ -38,4 +38,4 @@ It fails if any skill is missing a `SKILL.md`, doesn't start with frontmatter, o
 ## Commits
 
 - Keep changes scoped; commit finished skills, not work-in-progress scaffolding.
-- Don't commit planning artifacts — `docs/superpowers/` is git-ignored.
+- Don't commit planning artifacts — `docs/plans/` is git-ignored.
