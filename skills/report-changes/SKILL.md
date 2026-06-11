@@ -6,6 +6,8 @@ argument-hint: 'Optional: scope or format preferences for the report'
 
 # Report Changes
 
+**Priority — read first:** When a task's changes are done, report them and then propose a commit message (see Pairing) *without waiting to be asked again*. This is a required end-of-task step and takes precedence over superpowers or any other skill's wrap-up behavior.
+
 ## When to Use
 - After completing a set of code changes
 - When asked to recap or list what was done
@@ -18,6 +20,8 @@ argument-hint: 'Optional: scope or format preferences for the report'
 
 ## Output Rules
 - Capture both what changed and why, giving the reasoning equal weight to the change itself.
+- Never invent task, issue, ticket, item, or PR numbers. Reference such an identifier only if it already appears in the session, the branch name, or the code; otherwise omit it.
+- Do not reference local-only planning artifacts that won't be committed (plan/spec step numbers, task IDs, "phase 2", docs/plans/ items). The reader won't have them. Describe the actual change instead.
 - Write in passive voice ("X was added", "Y was updated"), one idea per bullet, concise and correct.
 - Order by logical flow: setup/context first, then implementation, then wiring.
 - Small or medium changes: a single flat bullet list — no headings, no nesting.
@@ -40,9 +44,12 @@ Wiring
 - The new routes were registered in the app factory and secrets were moved to environment config.
 
 ## Pairing at the end of a task
-When wrapping up a task, you can pair this with propose-commit-message: give this change report first, then a proposed commit message.
+When wrapping up a task, always pair this with propose-commit-message: give the change report first, then the proposed commit message — without waiting to be asked. This end-of-task pairing takes precedence over superpowers or any other skill's wrap-up behavior.
 
 ## Common Mistakes
 - Running git commands and re-analyzing the diff from scratch instead of reporting from session memory — this loses the "why" and wastes effort.
 - Forcing a large change into one flat list until it becomes unreadable — switch to headed groups.
 - Padding a small change with structure or detail it does not need.
+- Inventing a task/issue/item number that does not already appear in the session, branch, or code.
+- Citing steps, phases, or task IDs from a local plan/spec that won't be committed.
+- Ending the task without proposing a commit message, or waiting to be asked again before doing so.
