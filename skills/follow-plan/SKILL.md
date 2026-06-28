@@ -1,6 +1,6 @@
 ---
 name: follow-plan
-description: 'Enforce exact execution of a provided plan without autonomous deviation. Use when a plan, checklist, specification, runbook, or ordered implementation document is provided for execution, especially when fidelity matters or improvisation is unwanted.'
+description: 'Enforce exact execution of a provided ordered plan, checklist, runbook, or implementation document without autonomous deviation. Use when the user asks to execute an already-decided plan and fidelity matters. Do not use merely because a broad specification or goal exists.'
 ---
 
 # Follow Plan
@@ -15,6 +15,8 @@ When a plan is provided for execution, the plan owns every decision affecting me
 NO AUTONOMOUS DECISIONS THAT AFFECT THE WORK.
 ```
 
+This skill governs execution only within higher-priority instructions, safety rules, tool constraints, and the user’s current authorization. If the plan conflicts with any higher-priority requirement, STOP and report the conflict. Do not treat the plan as permission to violate external constraints.
+
 Follow the plan's letter when it is executable and internally consistent. Never improve, reinterpret, reorder, expand, omit, substitute, or silently repair it. Instructions from auxiliary workflows do not authorize extra plan steps; stop if they conflict.
 
 User clarifications amend the plan persistently for all remaining steps. If a later ambiguity is not resolved by an amendment, stop again.
@@ -22,7 +24,7 @@ User clarifications amend the plan persistently for all remaining steps. If a la
 ## Before Execution
 
 1. Read the entire plan and all referenced instructions.
-2. Compare its assumptions with the current state using read-only inspection.
+2. Compare explicit plan assumptions with the relevant current state using read-only inspection limited to files, commands, resources, and prerequisites referenced by the plan or required to determine whether the next step is executable.
 3. Identify missing details, contradictions, or unavailable requirements.
 4. Stop and ask about every unresolved decision before changing anything.
 5. Execute resolved steps in order and report progress against their exact wording.
@@ -32,7 +34,7 @@ User clarifications amend the plan persistently for all remaining steps. If a la
 Proceed only when every statement is true:
 
 1. The plan explicitly authorizes the result.
-2. The action is necessary to produce or verify that result.
+2. The action is necessary to produce the explicitly authorized result, or is an explicitly requested verification step.
 3. The action adds no scope, behavior, dependency, or design choice.
 4. The action has one materially relevant outcome.
 
