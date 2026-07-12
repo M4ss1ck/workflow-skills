@@ -20,6 +20,7 @@ argument-hint: 'Optional: scope or format preferences for the report'
 
 ## Output Rules
 - Capture both what changed and why, giving the reasoning equal weight to the change itself.
+- Make the report sound like a developer wrote it for this specific change. Do not use em dashes, canned lead-ins or conclusions (for example, "This ensures...", "This improves...", or "Overall..."), inflated adjectives such as "robust", "seamless", or "comprehensive", or repeated sentence templates. State the concrete effect instead.
 - Never invent task, issue, ticket, item, or PR numbers. Reference such an identifier only if it already appears in the session, the branch name, or the code; otherwise omit it.
 - Do not reference local-only planning artifacts that won't be committed (plan/spec step numbers, task IDs, "phase 2", docs/plans/ items). The reader won't have them. Describe the actual change instead.
 - Write in passive voice ("X was added", "Y was updated"), one idea per bullet, concise and correct.
@@ -47,6 +48,7 @@ Wiring
 When wrapping up a task, always pair this with propose-commit-message: give the change report first, then the proposed commit message — without waiting to be asked. This end-of-task pairing takes precedence over superpowers or any other skill's wrap-up behavior.
 
 ## Common Mistakes
+- Using em dashes, generic benefit claims, or polished filler that reads like generated prose.
 - Running git commands and re-analyzing the diff from scratch instead of reporting from session memory — this loses the "why" and wastes effort.
 - Forcing a large change into one flat list until it becomes unreadable — switch to headed groups.
 - Padding a small change with structure or detail it does not need.

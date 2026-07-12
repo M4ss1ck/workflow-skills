@@ -28,6 +28,7 @@ Refs: #123                     # footer, only if a real reference exists (see Nu
 ```
 - Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`.
 - Subject: imperative mood, no trailing period, kept to ~72 characters.
+- Use plain, project-specific language. Do not use em dashes, canned phrases such as "This ensures..." or "This improves...", inflated adjectives such as "robust", "seamless", or "comprehensive", or vague benefit claims. Name the concrete change and reason instead.
 
 ## Numbers and references
 Never invent issue, ticket, PR, or item numbers. Include a `Refs:`/`Closes:` footer — or any `#`-number anywhere in the subject or body — **only if that exact reference already appears** in the session, the branch name, or the code. If no real reference exists, omit it entirely; do not add a placeholder or guess one.
@@ -46,6 +47,7 @@ When wrapping up a task, this pairs with report-changes: give the change report 
 - The subject is imperative ("add", "fix") — deliberately different from report-changes' passive voice, because that is the commit convention.
 
 ## Common Mistakes
+- Using em dashes, generic benefit claims, or polished filler that reads like generated prose.
 - Omitting the Conventional Commits type prefix — a plain "Fix X" subject is not a Conventional Commit.
 - Describing unstaged or unrelated files as part of a commit that will not include them.
 - Bundling unrelated concerns into one message instead of suggesting separate commits.
