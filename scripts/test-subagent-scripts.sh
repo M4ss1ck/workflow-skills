@@ -173,8 +173,11 @@ echo "$msg" | grep -q 'doctor' || fail "opencode: missing-CLI error should menti
 cat >"$stub_dir/claude" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${STUB_DIR}/claude.args"
-echo "stub banner noise (must not break JSON parsing)" >&2
+echo "stub banner noise (must stay out of raw.jsonl)" >&2
+sleep "${STUB_SLEEP:-0}"
 cat <<'EOF'
+{"type":"system","subtype":"init","session_id":"ses_cl1"}
+{"type":"assistant","session_id":"ses_cl1","message":{"content":[{"type":"text","text":"working on it"}]}}
 {"type":"result","subtype":"success","is_error":false,"session_id":"ses_cl1","total_cost_usd":0.0311,"result":"Report: updated bar.py, tests pass"}
 EOF
 STUB
@@ -182,28 +185,80 @@ chmod +x "$stub_dir/claude"
 
 cl="$repo_root/skills/claude-subagent/scripts/delegate.sh"
 
+# launch prints the job block; wait returns the normalized result
 out="$(run_delegate "$cl" --model claude-haiku-4-5 "do the thing")"
-grep -q -- '-p --output-format json --permission-mode acceptEdits --model claude-haiku-4-5 do the thing' "$stub_dir/claude.args" \
+echo "$out" | grep -q '^JOB: claude-' || fail "claude: no JOB line: $out"
+echo "$out" | grep -q '^WATCH:' || fail "claude: no WATCH line: $out"
+job="$(job_of "$out")"
+res="$(run_delegate "$cl" --wait "$job" --poll-timeout 30)"
+grep -q -- '-p --output-format stream-json --verbose --permission-mode acceptEdits --model claude-haiku-4-5 do the thing' "$stub_dir/claude.args" \
   || fail "claude: unexpected args: $(cat "$stub_dir/claude.args")"
-echo "$out" | grep -q '^SESSION: ses_cl1$' || fail "claude: session not extracted: $out"
-echo "$out" | grep -q '^COST: 0.0311$' || fail "claude: cost not extracted: $out"
-echo "$out" | grep -q 'tests pass' || fail "claude: report text missing: $out"
+echo "$res" | grep -q '^SESSION: ses_cl1$' || fail "claude: session not extracted: $res"
+echo "$res" | grep -q '^COST: 0.0311$' || fail "claude: cost not extracted: $res"
+echo "$res" | grep -q 'tests pass' || fail "claude: report text missing: $res"
 
+# stderr is kept out of the JSON stream
+jd="$(jobdir_of "$job")"
+grep -q 'banner noise' "$jd/stderr.log" || fail "claude: stderr.log missing stub noise"
+jq -s empty "$jd/raw.jsonl" || fail "claude: raw.jsonl contaminated (not clean JSONL)"
+
+# a still-running job polls out with exit 3
+out="$(STUB_SLEEP=4 run_delegate "$cl" "slow task")"
+job="$(job_of "$out")"
+set +e
+res="$(run_delegate "$cl" --wait "$job" --poll-timeout 1)"
+code=$?
+set -e
+[ "$code" -eq 3 ] || fail "claude: running wait should exit 3, got $code"
+echo "$res" | grep -q '^RUNNING' || fail "claude: no RUNNING line: $res"
+res="$(run_delegate "$cl" --wait "$job" --poll-timeout 30)"
+echo "$res" | grep -q '^EXIT: 0$' || fail "claude: slow job did not finish clean: $res"
+
+# the hard timeout records status=timeout
+out="$(STUB_SLEEP=30 run_delegate "$cl" --timeout 1 "never finishes")"
+job="$(job_of "$out")"
+set +e
+run_delegate "$cl" --wait "$job" --poll-timeout 30 >/dev/null
+code=$?
+set -e
+[ "$code" -eq 124 ] || fail "claude: timeout should surface exit 124, got $code"
+
+# conf default / explicit model / save-default / no-model
+mkdir -p "$(dirname "$conf_file")"
+echo 'CLAUDE_SUBAGENT_MODEL=conf-claude-model' >"$conf_file"
 : >"$stub_dir/claude.args"
-run_delegate "$cl" --resume ses_cl1 --permission-mode bypassPermissions "fix: typo" >/dev/null
-grep -q -- '--permission-mode bypassPermissions --resume ses_cl1 fix: typo' "$stub_dir/claude.args" \
-  || fail "claude: resume/permission-mode args wrong: $(cat "$stub_dir/claude.args")"
-
-# no --model unless the user asked for one (delegate's configured default applies)
+launch_and_wait "$cl" "conf task" >/dev/null
+grep -q -- '--model conf-claude-model' "$stub_dir/claude.args" \
+  || fail "claude: conf default not applied: $(cat "$stub_dir/claude.args")"
+: >"$stub_dir/claude.args"
+launch_and_wait "$cl" --model explicit-claude "task" >/dev/null
+grep -q -- '--model explicit-claude' "$stub_dir/claude.args" \
+  || fail "claude: explicit model not passed: $(cat "$stub_dir/claude.args")"
+launch_and_wait "$cl" --model saved-claude --save-default "task" >/dev/null
+grep -q '^CLAUDE_SUBAGENT_MODEL=saved-claude$' "$conf_file" || fail "claude: --save-default not written"
+rm -f "$conf_file"
+: >"$stub_dir/claude.args"
+launch_and_wait "$cl" "plain task" >/dev/null
 if grep -q -- '--model' "$stub_dir/claude.args"; then
   fail "claude: passed --model the user did not request"
 fi
 
+# resume + permission-mode pass through
+: >"$stub_dir/claude.args"
+launch_and_wait "$cl" --resume ses_cl1 --permission-mode bypassPermissions "fix: typo" >/dev/null
+grep -q -- '--permission-mode bypassPermissions --resume ses_cl1 fix: typo' "$stub_dir/claude.args" \
+  || fail "claude: resume/permission-mode args wrong: $(cat "$stub_dir/claude.args")"
+
+# missing spec / missing CLI
+if run_delegate "$cl" --model x >/dev/null 2>&1; then
+  fail "claude: missing spec should exit nonzero"
+fi
 set +e
-STUB_DIR="$stub_dir" PATH="/usr/bin:/bin" bash "$cl" "task" >/dev/null 2>&1
+msg="$(STUB_DIR="$stub_dir" PATH="/usr/bin:/bin" bash "$cl" "task" 2>&1)"
 code=$?
 set -e
 [ "$code" -eq 127 ] || fail "claude: missing CLI should exit 127, got $code"
+echo "$msg" | grep -q 'doctor' || fail "claude: missing-CLI error should mention --doctor: $msg"
 
 # --- stub: codex ------------------------------------------------------------
 cat >"$stub_dir/codex" <<'STUB'
