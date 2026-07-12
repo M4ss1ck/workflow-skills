@@ -28,6 +28,7 @@ The body holds the instructions the agent follows when the skill is active. Keep
 - The directory name and frontmatter `name` must match.
 - Keep skills self-contained: reference supporting files by relative path inside the skill directory.
 - Match the tone and structure of existing skills; use `templates/skill-template.md` as the starting point.
+- The three `*-subagent` skills share an identical handoff contract by convention, not by shared code. When editing the contract in one SKILL.md, apply the same edit to all three.
 
 ## Before you finish
 
@@ -49,6 +50,12 @@ Run the linter tests when changing `scripts/lint-skills.sh`:
 
 ```bash
 bash scripts/test-lint-skills.sh
+```
+
+Run the subagent script tests when changing any `skills/*-subagent/scripts/delegate.sh`:
+
+```bash
+bash scripts/test-subagent-scripts.sh
 ```
 
 ## Planning artifacts
