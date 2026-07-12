@@ -73,4 +73,39 @@ code=$?
 set -e
 [ "$code" -eq 127 ] || fail "opencode: missing CLI should exit 127, got $code"
 
+# --- stub: claude -----------------------------------------------------------
+cat >"$stub_dir/claude" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${STUB_DIR}/claude.args"
+cat <<'EOF'
+{"type":"result","subtype":"success","is_error":false,"session_id":"ses_cl1","total_cost_usd":0.0311,"result":"Report: updated bar.py, tests pass"}
+EOF
+STUB
+chmod +x "$stub_dir/claude"
+
+cl="$repo_root/skills/claude-subagent/scripts/delegate.sh"
+
+out="$(run_delegate "$cl" --model claude-haiku-4-5 "do the thing")"
+grep -q -- '-p --output-format json --permission-mode acceptEdits --model claude-haiku-4-5 do the thing' "$stub_dir/claude.args" \
+  || fail "claude: unexpected args: $(cat "$stub_dir/claude.args")"
+echo "$out" | grep -q '^SESSION: ses_cl1$' || fail "claude: session not extracted: $out"
+echo "$out" | grep -q '^COST: 0.0311$' || fail "claude: cost not extracted: $out"
+echo "$out" | grep -q 'tests pass' || fail "claude: report text missing: $out"
+
+: >"$stub_dir/claude.args"
+run_delegate "$cl" --resume ses_cl1 --permission-mode bypassPermissions "fix: typo" >/dev/null
+grep -q -- '--permission-mode bypassPermissions --resume ses_cl1 fix: typo' "$stub_dir/claude.args" \
+  || fail "claude: resume/permission-mode args wrong: $(cat "$stub_dir/claude.args")"
+
+# no --model unless the user asked for one (delegate's configured default applies)
+if grep -q -- '--model' "$stub_dir/claude.args"; then
+  fail "claude: passed --model the user did not request"
+fi
+
+set +e
+STUB_DIR="$stub_dir" PATH="/usr/bin:/bin" bash "$cl" "task" >/dev/null 2>&1
+code=$?
+set -e
+[ "$code" -eq 127 ] || fail "claude: missing CLI should exit 127, got $code"
+
 echo "Subagent script tests passed."
