@@ -83,7 +83,7 @@ done
 # --doctor reports the subagent model conf
 mkdir -p "$tmp_home/.config/workflow-skills"
 echo 'OPENCODE_SUBAGENT_MODEL=stub/model' >"$tmp_home/.config/workflow-skills/subagents.conf"
-out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --doctor)"
+out="$(XDG_CONFIG_HOME="$tmp_home/.config" HOME="$tmp_home" "$repo_root/scripts/install.sh" --doctor)"
 echo "$out" | grep -q 'stub/model' || { echo "FAIL  --doctor missing conf contents" >&2; exit 1; }
 
 echo "Installer tests passed."
