@@ -33,17 +33,18 @@ else
 fi
 
 raw="$(mktemp)"
-trap 'rm -f "$raw"' EXIT
+err="$(mktemp)"
+trap 'rm -f "$raw" "$err"' EXIT
 
 set +e
-"${cmd[@]}" "$spec" >"$raw" 2>&1
+"${cmd[@]}" "$spec" >"$raw" 2>"$err"
 exit_code=$?
 set -e
 
 session="$(jq -rs '[.[] | select(.type? == "thread.started") | .thread_id? // empty] | first // empty' "$raw" 2>/dev/null || true)"
 usage="$(jq -rs '[.[] | select(.type? == "turn.completed") | .usage? // empty] | last // empty | if . == "" then "" else "\(.input_tokens) in / \(.output_tokens) out tokens" end' "$raw" 2>/dev/null || true)"
 report="$(jq -rs '[.[] | select(.type? == "item.completed") | .item? // empty | select(.type? == "agent_message") | .text? // empty] | last // empty' "$raw" 2>/dev/null || true)"
-[ -n "$report" ] || report="$(tail -c 4000 "$raw")"
+[ -n "$report" ] || report="$(tail -c 2000 "$err"; tail -c 2000 "$raw")"
 
 echo "SESSION: ${session:-unknown}"
 echo "COST: ${usage:-unknown}"

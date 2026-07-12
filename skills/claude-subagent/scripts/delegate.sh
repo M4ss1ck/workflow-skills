@@ -31,13 +31,14 @@ cmd=(claude -p --output-format json --permission-mode "$permission_mode")
 [ -n "$resume" ] && cmd+=(--resume "$resume")
 
 raw="$(mktemp)"
-trap 'rm -f "$raw"' EXIT
+err="$(mktemp)"
+trap 'rm -f "$raw" "$err"' EXIT
 
 set +e
 if [ -n "$cwd" ]; then
-  (cd "$cwd" && "${cmd[@]}" "$spec") >"$raw" 2>&1
+  (cd "$cwd" && "${cmd[@]}" "$spec") >"$raw" 2>"$err"
 else
-  "${cmd[@]}" "$spec" >"$raw" 2>&1
+  "${cmd[@]}" "$spec" >"$raw" 2>"$err"
 fi
 exit_code=$?
 set -e
@@ -45,7 +46,7 @@ set -e
 session="$(jq -r '.session_id // empty' "$raw" 2>/dev/null || true)"
 cost="$(jq -r '.total_cost_usd // empty' "$raw" 2>/dev/null || true)"
 report="$(jq -r '.result // empty' "$raw" 2>/dev/null || true)"
-[ -n "$report" ] || report="$(tail -c 4000 "$raw")"
+[ -n "$report" ] || report="$(tail -c 2000 "$err"; tail -c 2000 "$raw")"
 
 echo "SESSION: ${session:-unknown}"
 echo "COST: ${cost:-unknown}"

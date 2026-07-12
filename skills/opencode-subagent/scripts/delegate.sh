@@ -30,17 +30,18 @@ cmd=(opencode run --format json)
 [ -n "$resume" ] && cmd+=(--session "$resume")
 
 raw="$(mktemp)"
-trap 'rm -f "$raw"' EXIT
+err="$(mktemp)"
+trap 'rm -f "$raw" "$err"' EXIT
 
 set +e
-"${cmd[@]}" "$spec" >"$raw" 2>&1
+"${cmd[@]}" "$spec" >"$raw" 2>"$err"
 exit_code=$?
 set -e
 
 session="$(jq -rs '[.[] | .sessionID? // empty] | first // empty' "$raw" 2>/dev/null || true)"
 cost="$(jq -rs '[.[] | select(.type? == "step_finish") | .part.cost? // empty] | last // empty' "$raw" 2>/dev/null || true)"
 report="$(jq -rs '[.[] | select(.type? == "text") | .part.text? // empty] | last // empty' "$raw" 2>/dev/null || true)"
-[ -n "$report" ] || report="$(tail -c 4000 "$raw")"
+[ -n "$report" ] || report="$(tail -c 2000 "$err"; tail -c 2000 "$raw")"
 
 echo "SESSION: ${session:-unknown}"
 echo "COST: ${cost:-unknown}"

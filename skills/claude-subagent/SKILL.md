@@ -45,6 +45,7 @@ The delegation spec MUST contain, in this order:
 - Requires `claude` and `jq` on PATH. A nonzero script exit is an infrastructure failure (CLI missing, auth, crash) — inspect the output; do not blind-retry.
 - Exit 0 only means the delegate ran and reported; task success is decided by your verification run.
 - One delegation at a time per worktree — the delegate edits your working tree. Parallel delegation needs separate git worktrees.
+- Nested Claude Code sessions are steered toward a private scratchpad for "temporary" files. Name deliverable files by absolute path in the spec, or the delegate may write them to its scratchpad instead of your worktree.
 
 ## Output Rules
 

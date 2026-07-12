@@ -15,6 +15,7 @@ fail() {
 cat >"$stub_dir/opencode" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${STUB_DIR}/opencode.args"
+echo "stub banner noise (must not break JSON parsing)" >&2
 cat <<'EOF'
 {"type":"step_start","timestamp":1,"sessionID":"ses_oc1","part":{"type":"step-start"}}
 {"type":"text","timestamp":2,"sessionID":"ses_oc1","part":{"type":"text","text":"Report: created foo.txt, verification passed"}}
@@ -77,6 +78,7 @@ set -e
 cat >"$stub_dir/claude" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${STUB_DIR}/claude.args"
+echo "stub banner noise (must not break JSON parsing)" >&2
 cat <<'EOF'
 {"type":"result","subtype":"success","is_error":false,"session_id":"ses_cl1","total_cost_usd":0.0311,"result":"Report: updated bar.py, tests pass"}
 EOF
@@ -112,6 +114,7 @@ set -e
 cat >"$stub_dir/codex" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${STUB_DIR}/codex.args"
+echo "stub banner noise (must not break JSON parsing)" >&2
 cat <<'EOF'
 {"type":"thread.started","thread_id":"ses_cx1"}
 {"type":"item.completed","item":{"type":"agent_message","text":"Report: refactored baz.rs, cargo test passes"}}
