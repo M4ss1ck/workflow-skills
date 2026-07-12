@@ -11,11 +11,41 @@ fail() {
   exit 1
 }
 
+# jq must be real; the stubs replace only the provider CLIs.
+command -v jq >/dev/null || fail "these tests require jq on PATH"
+
+# Sandbox job state and conf under the temp dir; poll fast so tests stay quick.
+run_delegate() {
+  local script="$1"
+  shift
+  STUB_DIR="$stub_dir" \
+  STUB_SLEEP="${STUB_SLEEP:-0}" \
+  XDG_STATE_HOME="$stub_dir/state" \
+  XDG_CONFIG_HOME="$stub_dir/config" \
+  DELEGATE_POLL_INTERVAL=1 \
+  PATH="$stub_dir:$PATH" bash "$script" "$@"
+}
+
+job_of() { echo "$1" | sed -n 's/^JOB: //p'; }
+jobdir_of() { echo "$stub_dir/state/workflow-skills/subagents/$1"; }
+conf_file="$stub_dir/config/workflow-skills/subagents.conf"
+
+# Launch, then wait to completion; prints the wait output.
+launch_and_wait() {
+  local script="$1"
+  shift
+  local out job
+  out="$(run_delegate "$script" "$@")"
+  job="$(job_of "$out")"
+  run_delegate "$script" --wait "$job" --poll-timeout 30
+}
+
 # --- stub: opencode ---------------------------------------------------------
 cat >"$stub_dir/opencode" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${STUB_DIR}/opencode.args"
-echo "stub banner noise (must not break JSON parsing)" >&2
+echo "stub banner noise (must stay out of raw.jsonl)" >&2
+sleep "${STUB_SLEEP:-0}"
 cat <<'EOF'
 {"type":"step_start","timestamp":1,"sessionID":"ses_oc1","part":{"type":"step-start"}}
 {"type":"text","timestamp":2,"sessionID":"ses_oc1","part":{"type":"text","text":"Report: created foo.txt, verification passed"}}
@@ -24,42 +54,99 @@ EOF
 STUB
 chmod +x "$stub_dir/opencode"
 
-# jq must be real; the stubs replace only the provider CLIs.
-command -v jq >/dev/null || fail "these tests require jq on PATH"
-
-run_delegate() {
-  local script="$1"
-  shift
-  STUB_DIR="$stub_dir" PATH="$stub_dir:$PATH" bash "$script" "$@"
-}
-
 oc="$repo_root/skills/opencode-subagent/scripts/delegate.sh"
 
-# fresh delegation builds the right command and normalizes output
+# launch returns immediately and prints the job block
 out="$(run_delegate "$oc" --model anthropic/claude-haiku-4-5 "do the thing")"
+echo "$out" | grep -q '^JOB: opencode-' || fail "opencode: no JOB line: $out"
+echo "$out" | grep -q '^WATCH:' || fail "opencode: no WATCH line: $out"
+echo "$out" | grep -q '^STATUS:' || fail "opencode: no STATUS line: $out"
+echo "$out" | grep -q '^RESULT:' || fail "opencode: no RESULT line: $out"
+job="$(job_of "$out")"
+
+# wait returns the normalized result once the job finishes, exit 0
+res="$(run_delegate "$oc" --wait "$job" --poll-timeout 30)"
 grep -q 'run --format json --model anthropic/claude-haiku-4-5 do the thing' "$stub_dir/opencode.args" \
   || fail "opencode: unexpected args: $(cat "$stub_dir/opencode.args")"
-echo "$out" | grep -q '^SESSION: ses_oc1$' || fail "opencode: session not extracted: $out"
-echo "$out" | grep -q '^COST: 0.0042$' || fail "opencode: cost not extracted: $out"
-echo "$out" | grep -q '^EXIT: 0$' || fail "opencode: exit line missing: $out"
-echo "$out" | grep -q -- '--- REPORT ---' || fail "opencode: report marker missing: $out"
-echo "$out" | grep -q 'verification passed' || fail "opencode: report text missing: $out"
+echo "$res" | grep -q '^SESSION: ses_oc1$' || fail "opencode: session not extracted: $res"
+echo "$res" | grep -q '^COST: 0.0042$' || fail "opencode: cost not extracted: $res"
+echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: exit line missing: $res"
+echo "$res" | grep -q -- '--- REPORT ---' || fail "opencode: report marker missing: $res"
+echo "$res" | grep -q 'verification passed' || fail "opencode: report text missing: $res"
+
+# stderr is kept out of the JSON stream
+jd="$(jobdir_of "$job")"
+grep -q 'banner noise' "$jd/stderr.log" || fail "opencode: stderr.log missing stub noise"
+jq -s empty "$jd/raw.jsonl" || fail "opencode: raw.jsonl contaminated (not clean JSONL)"
+
+# a still-running job polls out with exit 3 and RUNNING + watch commands
+: >"$stub_dir/opencode.args"
+out="$(STUB_SLEEP=4 run_delegate "$oc" "slow task")"
+job="$(job_of "$out")"
+set +e
+res="$(run_delegate "$oc" --wait "$job" --poll-timeout 1)"
+code=$?
+set -e
+[ "$code" -eq 3 ] || fail "opencode: running wait should exit 3, got $code"
+echo "$res" | grep -q '^RUNNING' || fail "opencode: no RUNNING line: $res"
+echo "$res" | grep -q '^WATCH:' || fail "opencode: running wait should reprint WATCH: $res"
+res="$(run_delegate "$oc" --wait "$job" --poll-timeout 30)"
+echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: slow job did not finish clean: $res"
+
+# the hard timeout kills the job and records status=timeout
+out="$(STUB_SLEEP=30 run_delegate "$oc" --timeout 1 "never finishes")"
+job="$(job_of "$out")"
+set +e
+run_delegate "$oc" --wait "$job" --poll-timeout 30 >/dev/null
+code=$?
+set -e
+[ "$code" -eq 124 ] || fail "opencode: timeout should surface exit 124, got $code"
+grep -q '^timeout 124' "$(jobdir_of "$job")/status" || fail "opencode: status not marked timeout"
+
+# conf default applies when the user names no model
+mkdir -p "$(dirname "$conf_file")"
+echo 'OPENCODE_SUBAGENT_MODEL=stub/conf-model' >"$conf_file"
+: >"$stub_dir/opencode.args"
+launch_and_wait "$oc" "conf task" >/dev/null
+grep -q -- '--model stub/conf-model' "$stub_dir/opencode.args" \
+  || fail "opencode: conf default not applied: $(cat "$stub_dir/opencode.args")"
+
+# explicit --model beats the conf
+: >"$stub_dir/opencode.args"
+launch_and_wait "$oc" --model explicit/model "task" >/dev/null
+grep -q -- '--model explicit/model' "$stub_dir/opencode.args" \
+  || fail "opencode: explicit model not passed: $(cat "$stub_dir/opencode.args")"
+
+# --save-default writes the conf (idempotently: one line per key)
+launch_and_wait "$oc" --model saved/model --save-default "task" >/dev/null
+launch_and_wait "$oc" --model saved/model --save-default "task" >/dev/null
+count="$(grep -c '^OPENCODE_SUBAGENT_MODEL=' "$conf_file")"
+[ "$count" -eq 1 ] || fail "opencode: conf key duplicated (count=$count)"
+grep -q '^OPENCODE_SUBAGENT_MODEL=saved/model$' "$conf_file" || fail "opencode: --save-default not written"
+
+# no model named and no conf -> no --model flag at all
+rm -f "$conf_file"
+: >"$stub_dir/opencode.args"
+launch_and_wait "$oc" "plain task" >/dev/null
+if grep -q -- '--model' "$stub_dir/opencode.args"; then
+  fail "opencode: passed --model the user did not request"
+fi
 
 # resume maps to --session
 : >"$stub_dir/opencode.args"
-run_delegate "$oc" --resume ses_oc1 "fix: rename foo" >/dev/null
+launch_and_wait "$oc" --resume ses_oc1 "fix: rename foo" >/dev/null
 grep -q -- '--session ses_oc1 fix: rename foo' "$stub_dir/opencode.args" \
   || fail "opencode: resume did not pass --session: $(cat "$stub_dir/opencode.args")"
 
 # --cwd maps to --dir
 : >"$stub_dir/opencode.args"
-run_delegate "$oc" --cwd /tmp "task" >/dev/null
+launch_and_wait "$oc" --cwd /tmp "task" >/dev/null
 grep -q -- '--dir /tmp task' "$stub_dir/opencode.args" \
   || fail "opencode: --cwd did not pass --dir: $(cat "$stub_dir/opencode.args")"
 
-# no --model unless the user asked for one (delegate's configured default applies)
-if grep -q -- '--model' "$stub_dir/opencode.args"; then
-  fail "opencode: passed --model the user did not request"
+# --save-default without --model is a usage error
+if run_delegate "$oc" --save-default "task" >/dev/null 2>&1; then
+  fail "opencode: --save-default without --model should exit nonzero"
 fi
 
 # missing spec fails with usage error
@@ -67,12 +154,20 @@ if run_delegate "$oc" --model x/y >/dev/null 2>&1; then
   fail "opencode: missing spec should exit nonzero"
 fi
 
-# missing CLI fails loudly with 127
+# waiting on an unknown job fails with exit 2
 set +e
-STUB_DIR="$stub_dir" PATH="/usr/bin:/bin" bash "$oc" "task" >/dev/null 2>&1
+run_delegate "$oc" --wait no-such-job >/dev/null 2>&1
+code=$?
+set -e
+[ "$code" -eq 2 ] || fail "opencode: unknown job should exit 2, got $code"
+
+# missing CLI fails loudly with 127 and points at --doctor
+set +e
+msg="$(STUB_DIR="$stub_dir" PATH="/usr/bin:/bin" bash "$oc" "task" 2>&1)"
 code=$?
 set -e
 [ "$code" -eq 127 ] || fail "opencode: missing CLI should exit 127, got $code"
+echo "$msg" | grep -q 'doctor' || fail "opencode: missing-CLI error should mention --doctor: $msg"
 
 # --- stub: claude -----------------------------------------------------------
 cat >"$stub_dir/claude" <<'STUB'
