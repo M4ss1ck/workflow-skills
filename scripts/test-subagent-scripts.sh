@@ -108,4 +108,46 @@ code=$?
 set -e
 [ "$code" -eq 127 ] || fail "claude: missing CLI should exit 127, got $code"
 
+# --- stub: codex ------------------------------------------------------------
+cat >"$stub_dir/codex" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${STUB_DIR}/codex.args"
+cat <<'EOF'
+{"type":"thread.started","thread_id":"ses_cx1"}
+{"type":"item.completed","item":{"type":"agent_message","text":"Report: refactored baz.rs, cargo test passes"}}
+{"type":"turn.completed","usage":{"input_tokens":900,"output_tokens":210}}
+EOF
+STUB
+chmod +x "$stub_dir/codex"
+
+cx="$repo_root/skills/codex-subagent/scripts/delegate.sh"
+
+out="$(run_delegate "$cx" --model gpt-5-codex "do the thing")"
+grep -q -- 'exec --json -s workspace-write --skip-git-repo-check -m gpt-5-codex do the thing' "$stub_dir/codex.args" \
+  || fail "codex: unexpected args: $(cat "$stub_dir/codex.args")"
+echo "$out" | grep -q '^SESSION: ses_cx1$' || fail "codex: session not extracted: $out"
+echo "$out" | grep -q '^COST: 900 in / 210 out tokens$' || fail "codex: usage not extracted: $out"
+echo "$out" | grep -q 'cargo test passes' || fail "codex: report text missing: $out"
+
+: >"$stub_dir/codex.args"
+run_delegate "$cx" --resume ses_cx1 "fix: lint" >/dev/null
+grep -q -- '--json.*resume ses_cx1 fix: lint' "$stub_dir/codex.args" \
+  || fail "codex: resume args wrong: $(cat "$stub_dir/codex.args")"
+
+: >"$stub_dir/codex.args"
+run_delegate "$cx" --cwd /tmp "task" >/dev/null
+grep -q -- '-C /tmp task' "$stub_dir/codex.args" \
+  || fail "codex: --cwd did not pass -C: $(cat "$stub_dir/codex.args")"
+
+# no -m unless the user asked for one (delegate's configured default applies)
+if grep -q -- ' -m ' "$stub_dir/codex.args"; then
+  fail "codex: passed -m the user did not request"
+fi
+
+set +e
+STUB_DIR="$stub_dir" PATH="/usr/bin:/bin" bash "$cx" "task" >/dev/null 2>&1
+code=$?
+set -e
+[ "$code" -eq 127 ] || fail "codex: missing CLI should exit 127, got $code"
+
 echo "Subagent script tests passed."
