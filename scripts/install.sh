@@ -102,6 +102,13 @@ doctor() {
       printf '%-10s MISSING\n' "$tool"
     fi
   done
+  local conf="${XDG_CONFIG_HOME:-$HOME/.config}/workflow-skills/subagents.conf"
+  if [ -f "$conf" ]; then
+    printf '%-10s ok    %s\n' "conf" "$conf"
+    sed 's/^/           /' "$conf"
+  else
+    printf '%-10s none  %s (no saved subagent model defaults)\n' "conf" "$conf"
+  fi
 }
 
 setup_claude_permissions() {

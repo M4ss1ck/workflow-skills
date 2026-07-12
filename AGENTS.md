@@ -28,7 +28,7 @@ The body holds the instructions the agent follows when the skill is active. Keep
 - The directory name and frontmatter `name` must match.
 - Keep skills self-contained: reference supporting files by relative path inside the skill directory.
 - Match the tone and structure of existing skills; use `templates/skill-template.md` as the starting point.
-- The three `*-subagent` skills share an identical handoff contract by convention, not by shared code. When editing the contract in one SKILL.md, apply the same edit to all three.
+- The three `*-subagent` skills share an identical handoff contract and an identical `delegate.sh` flag interface (`--model / --cwd / --resume / --timeout / --save-default / --wait / --poll-timeout`) by convention, not by shared code. When editing either in one skill, apply the same edit to all three.
 
 ## Before you finish
 

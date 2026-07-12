@@ -80,4 +80,10 @@ for tool in claude codex opencode jq; do
   echo "$out" | grep -q "$tool" || { echo "FAIL  --doctor missing $tool" >&2; exit 1; }
 done
 
+# --doctor reports the subagent model conf
+mkdir -p "$tmp_home/.config/workflow-skills"
+echo 'OPENCODE_SUBAGENT_MODEL=stub/model' >"$tmp_home/.config/workflow-skills/subagents.conf"
+out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --doctor)"
+echo "$out" | grep -q 'stub/model' || { echo "FAIL  --doctor missing conf contents" >&2; exit 1; }
+
 echo "Installer tests passed."
