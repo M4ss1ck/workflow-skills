@@ -209,7 +209,8 @@ set -e
 cat >"$stub_dir/codex" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${STUB_DIR}/codex.args"
-echo "stub banner noise (must not break JSON parsing)" >&2
+echo "stub banner noise (must stay out of raw.jsonl)" >&2
+sleep "${STUB_SLEEP:-0}"
 cat <<'EOF'
 {"type":"thread.started","thread_id":"ses_cx1"}
 {"type":"item.completed","item":{"type":"agent_message","text":"Report: refactored baz.rs, cargo test passes"}}
@@ -220,32 +221,85 @@ chmod +x "$stub_dir/codex"
 
 cx="$repo_root/skills/codex-subagent/scripts/delegate.sh"
 
+# launch prints the job block; wait returns the normalized result
 out="$(run_delegate "$cx" --model gpt-5-codex "do the thing")"
+echo "$out" | grep -q '^JOB: codex-' || fail "codex: no JOB line: $out"
+echo "$out" | grep -q '^WATCH:' || fail "codex: no WATCH line: $out"
+job="$(job_of "$out")"
+res="$(run_delegate "$cx" --wait "$job" --poll-timeout 30)"
 grep -q -- 'exec --json -s workspace-write --skip-git-repo-check -m gpt-5-codex do the thing' "$stub_dir/codex.args" \
   || fail "codex: unexpected args: $(cat "$stub_dir/codex.args")"
-echo "$out" | grep -q '^SESSION: ses_cx1$' || fail "codex: session not extracted: $out"
-echo "$out" | grep -q '^COST: 900 in / 210 out tokens$' || fail "codex: usage not extracted: $out"
-echo "$out" | grep -q 'cargo test passes' || fail "codex: report text missing: $out"
+echo "$res" | grep -q '^SESSION: ses_cx1$' || fail "codex: session not extracted: $res"
+echo "$res" | grep -q '^COST: 900 in / 210 out tokens$' || fail "codex: usage not extracted: $res"
+echo "$res" | grep -q 'cargo test passes' || fail "codex: report text missing: $res"
 
+# stderr is kept out of the JSON stream
+jd="$(jobdir_of "$job")"
+grep -q 'banner noise' "$jd/stderr.log" || fail "codex: stderr.log missing stub noise"
+jq -s empty "$jd/raw.jsonl" || fail "codex: raw.jsonl contaminated (not clean JSONL)"
+
+# a still-running job polls out with exit 3
+out="$(STUB_SLEEP=4 run_delegate "$cx" "slow task")"
+job="$(job_of "$out")"
+set +e
+res="$(run_delegate "$cx" --wait "$job" --poll-timeout 1)"
+code=$?
+set -e
+[ "$code" -eq 3 ] || fail "codex: running wait should exit 3, got $code"
+echo "$res" | grep -q '^RUNNING' || fail "codex: no RUNNING line: $res"
+res="$(run_delegate "$cx" --wait "$job" --poll-timeout 30)"
+echo "$res" | grep -q '^EXIT: 0$' || fail "codex: slow job did not finish clean: $res"
+
+# the hard timeout records status=timeout
+out="$(STUB_SLEEP=30 run_delegate "$cx" --timeout 1 "never finishes")"
+job="$(job_of "$out")"
+set +e
+run_delegate "$cx" --wait "$job" --poll-timeout 30 >/dev/null
+code=$?
+set -e
+[ "$code" -eq 124 ] || fail "codex: timeout should surface exit 124, got $code"
+
+# conf default / explicit model / save-default / no-model
+mkdir -p "$(dirname "$conf_file")"
+echo 'CODEX_SUBAGENT_MODEL=conf-codex-model' >"$conf_file"
 : >"$stub_dir/codex.args"
-run_delegate "$cx" --resume ses_cx1 "fix: lint" >/dev/null
-grep -q -- '--json.*resume ses_cx1 fix: lint' "$stub_dir/codex.args" \
-  || fail "codex: resume args wrong: $(cat "$stub_dir/codex.args")"
-
+launch_and_wait "$cx" "conf task" >/dev/null
+grep -q -- '-m conf-codex-model' "$stub_dir/codex.args" \
+  || fail "codex: conf default not applied: $(cat "$stub_dir/codex.args")"
 : >"$stub_dir/codex.args"
-run_delegate "$cx" --cwd /tmp "task" >/dev/null
-grep -q -- '-C /tmp task' "$stub_dir/codex.args" \
-  || fail "codex: --cwd did not pass -C: $(cat "$stub_dir/codex.args")"
-
-# no -m unless the user asked for one (delegate's configured default applies)
+launch_and_wait "$cx" --model explicit-codex "task" >/dev/null
+grep -q -- '-m explicit-codex' "$stub_dir/codex.args" \
+  || fail "codex: explicit model not passed: $(cat "$stub_dir/codex.args")"
+launch_and_wait "$cx" --model saved-codex --save-default "task" >/dev/null
+grep -q '^CODEX_SUBAGENT_MODEL=saved-codex$' "$conf_file" || fail "codex: --save-default not written"
+rm -f "$conf_file"
+: >"$stub_dir/codex.args"
+launch_and_wait "$cx" "plain task" >/dev/null
 if grep -q -- ' -m ' "$stub_dir/codex.args"; then
   fail "codex: passed -m the user did not request"
 fi
 
+# resume maps to exec resume (and drops the fresh-run sandbox flags)
+: >"$stub_dir/codex.args"
+launch_and_wait "$cx" --resume ses_cx1 "fix: lint" >/dev/null
+grep -q -- '--json.*resume ses_cx1 fix: lint' "$stub_dir/codex.args" \
+  || fail "codex: resume args wrong: $(cat "$stub_dir/codex.args")"
+
+# --cwd maps to -C
+: >"$stub_dir/codex.args"
+launch_and_wait "$cx" --cwd /tmp "task" >/dev/null
+grep -q -- '-C /tmp task' "$stub_dir/codex.args" \
+  || fail "codex: --cwd did not pass -C: $(cat "$stub_dir/codex.args")"
+
+# missing spec / missing CLI
+if run_delegate "$cx" --model x >/dev/null 2>&1; then
+  fail "codex: missing spec should exit nonzero"
+fi
 set +e
-STUB_DIR="$stub_dir" PATH="/usr/bin:/bin" bash "$cx" "task" >/dev/null 2>&1
+msg="$(STUB_DIR="$stub_dir" PATH="/usr/bin:/bin" bash "$cx" "task" 2>&1)"
 code=$?
 set -e
 [ "$code" -eq 127 ] || fail "codex: missing CLI should exit 127, got $code"
+echo "$msg" | grep -q 'doctor' || fail "codex: missing-CLI error should mention --doctor: $msg"
 
 echo "Subagent script tests passed."
