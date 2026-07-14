@@ -20,6 +20,11 @@ run_delegate() {
   shift
   STUB_DIR="$stub_dir" \
   STUB_SLEEP="${STUB_SLEEP:-0}" \
+  STUB_RESUME_HANG="${STUB_RESUME_HANG:-0}" \
+  STUB_FRESH_HANG="${STUB_FRESH_HANG:-0}" \
+  STUB_NO_FINAL="${STUB_NO_FINAL:-0}" \
+  STUB_DB_FAIL="${STUB_DB_FAIL:-0}" \
+  STUB_FINISH_DRIFT="${STUB_FINISH_DRIFT:-0}" \
   XDG_STATE_HOME="$stub_dir/state" \
   XDG_CONFIG_HOME="$stub_dir/config" \
   DELEGATE_POLL_INTERVAL=1 \
@@ -44,10 +49,74 @@ launch_and_wait() {
 cat >"$stub_dir/opencode" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${STUB_DIR}/opencode.args"
+if [ "${1:-}" = "db" ]; then
+  if [ "${2:-}" = "path" ]; then
+    : >"${STUB_DIR}/opencode.db"
+    echo "${STUB_DIR}/opencode.db"
+    exit 0
+  fi
+  printf '%s\n' "${2:-}" >>"${STUB_DIR}/opencode-db.sql"
+  if [ "${STUB_DB_FAIL:-0}" = "1" ]; then
+    echo 'stub database failure' >&2
+    exit 1
+  fi
+  case "${2:-}" in
+    *"json_extract(data, '$.finish') = 'stop'"*)
+      if [ "${STUB_NO_FINAL:-0}" = "1" ] || [ "${STUB_FINISH_DRIFT:-0}" = "1" ] || [ ! -s "${STUB_DIR}/opencode-final.id" ]; then
+        echo '[]'
+      else
+        printf '[{"id":"%s"}]\n' "$(cat "${STUB_DIR}/opencode-final.id")"
+      fi
+      ;;
+    *"SELECT id FROM message"*)
+      if [ -s "${STUB_DIR}/opencode-assistant.id" ]; then
+        printf '[{"id":"%s"}]\n' "$(cat "${STUB_DIR}/opencode-assistant.id")"
+      else
+        echo '[]'
+      fi
+      ;;
+    *"AS finish FROM message"*)
+      if [ "${STUB_FINISH_DRIFT:-0}" = "1" ]; then
+        echo '[{"finish":"completed"}]'
+      elif [ "${STUB_NO_FINAL:-0}" = "1" ]; then
+        echo '[{"finish":null}]'
+      else
+        echo '[{"finish":"stop"}]'
+      fi
+      ;;
+    *"SELECT json_extract(data, '$.text') AS text"*)
+      echo '[{"text":"Report: provider final verification passed"}]'
+      ;;
+    *"SELECT COALESCE(SUM"*)
+      echo '[{"cost":0.0042}]'
+      ;;
+    *"SELECT time_created, message_id"*)
+      echo '[{"time_created":2,"message_id":"msg_oc_final","type":"text","tool":null,"status":null,"text":"provider final verification passed"}]'
+      ;;
+    *)
+      echo '[]'
+      ;;
+  esac
+  exit 0
+fi
 echo "stub banner noise (must stay out of raw.jsonl)" >&2
-sleep "${STUB_SLEEP:-0}"
+turn="$$-$RANDOM"
+rm -f "${STUB_DIR}/opencode-final.id"
+printf 'msg_oc_assistant_%s\n' "$turn" >"${STUB_DIR}/opencode-assistant.id"
 cat <<'EOF'
 {"type":"step_start","timestamp":1,"sessionID":"ses_oc1","part":{"type":"step-start"}}
+EOF
+if { [ "${STUB_RESUME_HANG:-0}" = "1" ] && [[ " $* " == *" --session "* ]]; } \
+  || { [ "${STUB_FRESH_HANG:-0}" = "1" ] && [[ " $* " != *" --session "* ]]; }; then
+  printf 'msg_oc_final_%s\n' "$turn" >"${STUB_DIR}/opencode-final.id"
+  sleep 30
+  exit 0
+fi
+sleep "${STUB_SLEEP:-0}"
+if [ "${STUB_NO_FINAL:-0}" != "1" ]; then
+  printf 'msg_oc_final_%s\n' "$turn" >"${STUB_DIR}/opencode-final.id"
+fi
+cat <<'EOF'
 {"type":"text","timestamp":2,"sessionID":"ses_oc1","part":{"type":"text","text":"Report: created foo.txt, verification passed"}}
 {"type":"step_finish","timestamp":3,"sessionID":"ses_oc1","part":{"type":"step-finish","cost":0.0042,"tokens":{"total":13009,"input":171,"output":27}}}
 EOF
@@ -61,6 +130,8 @@ out="$(run_delegate "$oc" --model anthropic/claude-haiku-4-5 "do the thing")"
 echo "$out" | grep -q '^JOB: opencode-' || fail "opencode: no JOB line: $out"
 echo "$out" | grep -q '^WATCH:' || fail "opencode: no WATCH line: $out"
 echo "$out" | grep -q '^STATUS:' || fail "opencode: no STATUS line: $out"
+echo "$out" | grep -q '^PROGRESS:' || fail "opencode: no PROGRESS line: $out"
+echo "$out" | grep -q '^PROVIDER_REPORT:' || fail "opencode: no PROVIDER_REPORT line: $out"
 echo "$out" | grep -q '^RESULT:' || fail "opencode: no RESULT line: $out"
 job="$(job_of "$out")"
 
@@ -78,6 +149,8 @@ echo "$res" | grep -q 'verification passed' || fail "opencode: report text missi
 jd="$(jobdir_of "$job")"
 grep -q 'banner noise' "$jd/stderr.log" || fail "opencode: stderr.log missing stub noise"
 jq -s empty "$jd/raw.jsonl" || fail "opencode: raw.jsonl contaminated (not clean JSONL)"
+grep -q 'provider final verification passed' "$jd/provider-report.txt" \
+  || fail "opencode: provider report file missing final response"
 
 # a still-running job polls out with exit 3 and RUNNING + watch commands
 : >"$stub_dir/opencode.args"
@@ -90,6 +163,12 @@ set -e
 [ "$code" -eq 3 ] || fail "opencode: running wait should exit 3, got $code"
 echo "$res" | grep -q '^RUNNING' || fail "opencode: no RUNNING line: $res"
 echo "$res" | grep -q '^WATCH:' || fail "opencode: running wait should reprint WATCH: $res"
+for _ in 1 2 3; do
+  if grep -q 'provider final verification passed' "$(jobdir_of "$job")/provider-progress.json"; then break; fi
+  sleep 1
+done
+grep -q 'provider final verification passed' "$(jobdir_of "$job")/provider-progress.json" \
+  || fail "opencode: fresh-run provider progress stayed empty"
 res="$(run_delegate "$oc" --wait "$job" --poll-timeout 30)"
 echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: slow job did not finish clean: $res"
 
@@ -137,6 +216,54 @@ fi
 launch_and_wait "$oc" --resume ses_oc1 "fix: rename foo" >/dev/null
 grep -q -- '--session ses_oc1 fix: rename foo' "$stub_dir/opencode.args" \
   || fail "opencode: resume did not pass --session: $(cat "$stub_dir/opencode.args")"
+
+# a provider-final response completes a resume even when the CLI event stream hangs
+: >"$stub_dir/opencode.args"
+out="$(STUB_RESUME_HANG=1 run_delegate "$oc" --resume ses_oc1 "fix: hung stream")"
+job="$(job_of "$out")"
+res="$(run_delegate "$oc" --wait "$job" --poll-timeout 30)"
+echo "$res" | grep -q '^SESSION: ses_oc1$' || fail "opencode: recovered resume session missing: $res"
+echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: provider-complete resume did not finish cleanly: $res"
+grep -q 'provider final verification passed' "$(jobdir_of "$job")/provider-report.txt" \
+  || fail "opencode: recovered resume provider report missing"
+
+# the same provider-final detection protects a fresh run with a hung event stream
+out="$(STUB_FRESH_HANG=1 run_delegate "$oc" "hung fresh stream")"
+job="$(job_of "$out")"
+res="$(run_delegate "$oc" --wait "$job" --poll-timeout 10)"
+echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: provider-complete fresh run did not finish cleanly: $res"
+
+# exit 0 without a provider-final response is incomplete, not successful
+out="$(STUB_NO_FINAL=1 run_delegate "$oc" "incomplete task")"
+job="$(job_of "$out")"
+set +e
+res="$(STUB_NO_FINAL=1 run_delegate "$oc" --wait "$job" --poll-timeout 30)"
+code=$?
+set -e
+[ "$code" -eq 4 ] || fail "opencode: incomplete provider turn should exit 4, got $code"
+grep -q '^incomplete 4' "$(jobdir_of "$job")/status" || fail "opencode: incomplete turn not marked incomplete"
+echo "$res" | grep -q 'before producing a provider-final response' \
+  || fail "opencode: incomplete turn lacks actionable report: $res"
+
+# database query failures fall back to CLI output and still finalize job state
+out="$(STUB_DB_FAIL=1 run_delegate "$oc" "db fallback")"
+job="$(job_of "$out")"
+res="$(run_delegate "$oc" --wait "$job" --poll-timeout 30)"
+echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: DB failure replaced successful CLI exit: $res"
+echo "$res" | grep -q 'created foo.txt' || fail "opencode: DB failure lost CLI report: $res"
+grep -q '^done 0' "$(jobdir_of "$job")/status" || fail "opencode: DB failure stranded running status"
+
+# an unknown provider finish value is schema drift, not proof of incompleteness
+out="$(STUB_FINISH_DRIFT=1 run_delegate "$oc" "finish drift")"
+job="$(job_of "$out")"
+res="$(run_delegate "$oc" --wait "$job" --poll-timeout 30)"
+echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: finish-state drift caused false exit 4: $res"
+
+# SQL literals quote resume ids instead of allowing cross-session predicates
+: >"$stub_dir/opencode-db.sql"
+launch_and_wait "$oc" --resume "abc' OR '1'='1" "quote session" >/dev/null
+grep -Fq "session_id='abc'' OR ''1''=''1'" "$stub_dir/opencode-db.sql" \
+  || fail "opencode: resume session was not SQL-quoted"
 
 # --cwd maps to --dir
 : >"$stub_dir/opencode.args"
@@ -189,6 +316,8 @@ cl="$repo_root/skills/claude-subagent/scripts/delegate.sh"
 out="$(run_delegate "$cl" --model claude-haiku-4-5 "do the thing")"
 echo "$out" | grep -q '^JOB: claude-' || fail "claude: no JOB line: $out"
 echo "$out" | grep -q '^WATCH:' || fail "claude: no WATCH line: $out"
+echo "$out" | grep -q '^PROGRESS:' || fail "claude: no PROGRESS line: $out"
+echo "$out" | grep -q '^PROVIDER_REPORT:' || fail "claude: no PROVIDER_REPORT line: $out"
 job="$(job_of "$out")"
 res="$(run_delegate "$cl" --wait "$job" --poll-timeout 30)"
 grep -q -- '-p --output-format stream-json --verbose --permission-mode acceptEdits --model claude-haiku-4-5 do the thing' "$stub_dir/claude.args" \
@@ -201,6 +330,7 @@ echo "$res" | grep -q 'tests pass' || fail "claude: report text missing: $res"
 jd="$(jobdir_of "$job")"
 grep -q 'banner noise' "$jd/stderr.log" || fail "claude: stderr.log missing stub noise"
 jq -s empty "$jd/raw.jsonl" || fail "claude: raw.jsonl contaminated (not clean JSONL)"
+grep -q 'tests pass' "$jd/provider-report.txt" || fail "claude: provider report file missing final response"
 
 # a still-running job polls out with exit 3
 out="$(STUB_SLEEP=4 run_delegate "$cl" "slow task")"
@@ -280,6 +410,8 @@ cx="$repo_root/skills/codex-subagent/scripts/delegate.sh"
 out="$(run_delegate "$cx" --model gpt-5-codex "do the thing")"
 echo "$out" | grep -q '^JOB: codex-' || fail "codex: no JOB line: $out"
 echo "$out" | grep -q '^WATCH:' || fail "codex: no WATCH line: $out"
+echo "$out" | grep -q '^PROGRESS:' || fail "codex: no PROGRESS line: $out"
+echo "$out" | grep -q '^PROVIDER_REPORT:' || fail "codex: no PROVIDER_REPORT line: $out"
 job="$(job_of "$out")"
 res="$(run_delegate "$cx" --wait "$job" --poll-timeout 30)"
 grep -q -- 'exec --json -s workspace-write --skip-git-repo-check -m gpt-5-codex do the thing' "$stub_dir/codex.args" \
@@ -292,6 +424,7 @@ echo "$res" | grep -q 'cargo test passes' || fail "codex: report text missing: $
 jd="$(jobdir_of "$job")"
 grep -q 'banner noise' "$jd/stderr.log" || fail "codex: stderr.log missing stub noise"
 jq -s empty "$jd/raw.jsonl" || fail "codex: raw.jsonl contaminated (not clean JSONL)"
+grep -q 'cargo test passes' "$jd/provider-report.txt" || fail "codex: provider report file missing final response"
 
 # a still-running job polls out with exit 3
 out="$(STUB_SLEEP=4 run_delegate "$cx" "slow task")"

@@ -34,8 +34,8 @@ The delegation spec MUST contain, in this order:
 4. Launch (path relative to this skill's directory):
    `bash scripts/delegate.sh [--model M] [--cwd DIR] [--timeout SECS] "<spec>"`
    The delegate runs with Codex's `workspace-write` sandbox: it can edit files and run commands in the worktree, but nested network access depends on the user's `~/.codex/config.toml` (`[sandbox_workspace_write] network_access = true` — the installer can set this with consent).
-   This returns immediately with a `JOB:` id and `WATCH:` / `STATUS:` / `RESULT:` lines.
-5. Relay the WATCH, STATUS, and RESULT commands to the user right away, before waiting — those are how they follow the subagent's work live.
+   This returns immediately with a `JOB:` id and `WATCH:` / `STATUS:` / `PROGRESS:` / `PROVIDER_REPORT:` / `RESULT:` lines.
+5. Relay every returned monitoring command to the user right away, before waiting. `PROGRESS` exposes the raw provider stream; `PROVIDER_REPORT` stores the final response separately.
 6. Wait with bounded polls: `bash scripts/delegate.sh --wait <JOB> --poll-timeout 300`, setting your shell tool's own timeout above 300 s. Exit 3 means still running — poll again. Never abandon a running job silently; if you must stop, give the user the job id and the watch commands.
 7. When the wait prints the result, read `SESSION:` (keep it for follow-ups), `COST:` (token usage), `EXIT:`, and the report after `--- REPORT ---`.
 8. Re-run the definition-of-done command yourself when one exists. Never accept the report's success claim alone.
@@ -46,12 +46,12 @@ The delegation spec MUST contain, in this order:
 ## Constraints
 
 - Requires `codex` and `jq` on PATH — check with `scripts/install.sh --doctor` from the workflow-skills repo. A nonzero launch exit is an infrastructure failure (CLI missing, auth, crash) — inspect the output; do not blind-retry.
-- The subagent runs detached: job state lives under `~/.local/state/workflow-skills/subagents/<JOB>/` (`raw.jsonl`, `stderr.log`, `status`, `result.txt`) and survives your session. A hard timeout (default 30 min, `--timeout` to change) guarantees no job runs forever.
+- The subagent runs detached: job state lives under `~/.local/state/workflow-skills/subagents/<JOB>/` (`raw.jsonl`, `provider-report.txt`, `stderr.log`, `status`, `result.txt`) and survives your session. A hard timeout (default 30 min, `--timeout` to change) guarantees no job runs forever.
 - Exit 0 on the final wait only means the delegate ran and reported; task success is decided by your verification run. Exit 3 from `--wait` is not a failure — the job is still running.
 - One delegation at a time per worktree — the delegate edits your working tree. Parallel delegation needs separate git worktrees.
 
 ## Output Rules
 
-- Immediately after launching, give the user the JOB id and the WATCH/STATUS/RESULT commands verbatim so they can follow along.
+- Immediately after launching, give the user the JOB id and all returned monitoring commands verbatim so they can follow along.
 - Tell the user: what was delegated, the model used, the verification command and its actual result, the session id, and token usage when reported.
 - Never claim the delegated task succeeded without showing your own verification output.

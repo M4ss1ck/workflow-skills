@@ -29,24 +29,24 @@ The delegation spec MUST contain, in this order:
 3. Write the spec per the Handoff Contract.
 4. Launch (path relative to this skill's directory):
    `bash scripts/delegate.sh [--model provider/model] [--cwd DIR] [--timeout SECS] "<spec>"`
-   This returns immediately with a `JOB:` id and `WATCH:` / `STATUS:` / `RESULT:` lines.
-5. Relay the WATCH, STATUS, and RESULT commands to the user right away, before waiting — those are how they follow the subagent's work live.
-6. Wait with bounded polls: `bash scripts/delegate.sh --wait <JOB> --poll-timeout 300`, setting your shell tool's own timeout above 300 s. Exit 3 means still running — poll again. Never abandon a running job silently; if you must stop, give the user the job id and the watch commands.
+   This returns immediately with a `JOB:` id and `WATCH:` / `STATUS:` / `PROGRESS:` / `PROVIDER_REPORT:` / `RESULT:` lines.
+5. Relay every returned monitoring command to the user right away, before waiting. `PROGRESS` is refreshed from OpenCode's local database once the session is observable, including on fresh runs and when a resumed CLI emits no stdout; `PROVIDER_REPORT` stores the best available final response.
+6. Wait with bounded polls: `bash scripts/delegate.sh --wait <JOB> --poll-timeout 300`, setting your shell tool's own timeout above 300 s. Exit 3 means still running — poll again. Exit 4 means OpenCode produced assistant activity but no provider-final response — read the result and resume the returned session. Never abandon a running job silently; if you must stop, give the user the job id and the watch commands.
 7. When the wait prints the result, read `SESSION:` (keep it for follow-ups), `COST:` (USD when reported), `EXIT:`, and the report after `--- REPORT ---`.
 8. Re-run the definition-of-done command yourself when one exists. Never accept the report's success claim alone.
-9. If verification fails, resume — do not re-delegate from scratch:
+9. If the wait exits 4 or verification fails, resume — do not re-delegate from scratch:
    `bash scripts/delegate.sh --resume <SESSION> "fix: <specific correction>"`
    That launches a new job; follow it the same way. After two failed resumes, take the task over in-context.
 
 ## Constraints
 
-- Requires `opencode` and `jq` on PATH — check with `scripts/install.sh --doctor` from the workflow-skills repo. A nonzero launch exit is an infrastructure failure (CLI missing, auth, crash) — inspect the output; do not blind-retry.
-- The subagent runs detached: job state lives under `~/.local/state/workflow-skills/subagents/<JOB>/` (`raw.jsonl`, `stderr.log`, `status`, `result.txt`) and survives your session. A hard timeout (default 30 min, `--timeout` to change) guarantees no job runs forever.
-- Exit 0 on the final wait only means the delegate ran and reported; task success is decided by your verification run. Exit 3 from `--wait` is not a failure — the job is still running.
+- Requires `opencode` and `jq` on PATH — check with `scripts/install.sh --doctor` from the workflow-skills repo. A launch command that fails before returning a `JOB:` id is an infrastructure failure (CLI missing, auth, crash) — inspect the output; do not blind-retry.
+- The subagent runs detached: job state lives under `~/.local/state/workflow-skills/subagents/<JOB>/` (`raw.jsonl`, `provider-progress.json`, `provider-report.txt`, `stderr.log`, `status`, `result.txt`) and survives your session. The wrapper detects a new provider-final response from OpenCode's local database on fresh and resumed runs and terminates a stale CLI event stream safely. Database enrichment is best-effort; query failures fall back to the captured CLI stream. A hard timeout (default 30 min, `--timeout` to change) guarantees no job runs forever.
+- Exit 0 on the final wait only means the delegate ran and reported; task success is decided by your verification run. Exit 3 means the job is still running. Exit 4 means the turn is incomplete but resumable; use the returned `SESSION:` id instead of treating it as infrastructure failure.
 - One delegation at a time per worktree — the delegate edits your working tree. Parallel delegation needs separate git worktrees.
 
 ## Output Rules
 
-- Immediately after launching, give the user the JOB id and the WATCH/STATUS/RESULT commands verbatim so they can follow along.
+- Immediately after launching, give the user the JOB id and all returned monitoring commands verbatim so they can follow along.
 - Tell the user: what was delegated, the model used, the verification command and its actual result, the session id, and the cost when reported.
 - Never claim the delegated task succeeded without showing your own verification output.

@@ -46,6 +46,8 @@ print_watch() {
   local jobdir="$1"
   echo "WATCH:  tail -f $jobdir/raw.jsonl | jq -r '$watch_filter'"
   echo "STATUS: cat $jobdir/status"
+  echo "PROGRESS: cat $jobdir/raw.jsonl"
+  echo "PROVIDER_REPORT: cat $jobdir/provider-report.txt"
   echo "RESULT: cat $jobdir/result.txt"
 }
 
@@ -80,6 +82,7 @@ do_run() {
   session="$(jq -rs '[.[] | .session_id? // empty] | first // empty' "$jobdir/raw.jsonl" 2>/dev/null || true)"
   cost="$(jq -rs '[.[] | select(.type? == "result") | .total_cost_usd? // empty] | last // empty' "$jobdir/raw.jsonl" 2>/dev/null || true)"
   report="$(jq -rs '[.[] | select(.type? == "result") | .result? // empty] | last // empty' "$jobdir/raw.jsonl" 2>/dev/null || true)"
+  printf '%s\n' "$report" >"$jobdir/provider-report.txt"
   if [ -z "$report" ]; then
     report="$(tail -c 2000 "$jobdir/stderr.log"; tail -c 2000 "$jobdir/raw.jsonl")"
   fi
@@ -162,6 +165,7 @@ do_launch() {
   date +%s >"$jobdir/started"
   echo running >"$jobdir/status"
   : >"$jobdir/raw.jsonl"
+  : >"$jobdir/provider-report.txt"
 
   local args=(--__run "$jobdir" --timeout "$hard_timeout")
   if [ -n "$model" ]; then args+=(--model "$model"); fi
