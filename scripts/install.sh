@@ -102,6 +102,12 @@ doctor() {
       printf '%-10s MISSING\n' "$tool"
     fi
   done
+  local worker="$HOME/.config/opencode/agent/workflow-worker.md"
+  if [ -e "$worker" ]; then
+    printf '%-10s ok    %s\n' "worker" "$worker"
+  else
+    printf '%-10s none  %s (delegate.sh installs it on first launch)\n' "worker" "$worker"
+  fi
   local conf="${XDG_CONFIG_HOME:-$HOME/.config}/workflow-skills/subagents.conf"
   if [ -f "$conf" ]; then
     printf '%-10s ok    %s\n' "conf" "$conf"
@@ -238,8 +244,35 @@ install_into() {
   done
 }
 
+# Skills that ship an OpenCode agent definition need it in OpenCode's agent
+# directory, otherwise `opencode run --agent NAME` silently falls back to the
+# unconstrained default agent.
+install_opencode_agents() {
+  local dest_dir="$HOME/.config/opencode/agent"
+  local src name
+
+  mkdir -p "$dest_dir"
+  for src in "$skills_src"/*/agents/*.md; do
+    [ -f "$src" ] || continue
+    name="$(basename "$src")"
+    rm -f "$dest_dir/$name"
+    if [ "$mode" = "copy" ]; then
+      cp "$src" "$dest_dir/$name"
+    else
+      ln -s "$src" "$dest_dir/$name"
+    fi
+    echo "agent    ${name%.md} -> $dest_dir/$name"
+  done
+}
+
 for target in "${targets[@]}"; do
   install_into "$target"
+done
+
+for host in ${selected_hosts[@]+"${selected_hosts[@]}"}; do
+  if [ "$host" = "opencode" ]; then
+    install_opencode_agents
+  fi
 done
 
 maybe_setup_permissions() {

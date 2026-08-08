@@ -28,7 +28,9 @@ The body holds the instructions the agent follows when the skill is active. Keep
 - The directory name and frontmatter `name` must match.
 - Keep skills self-contained: reference supporting files by relative path inside the skill directory.
 - Match the tone and structure of existing skills; use `templates/skill-template.md` as the starting point.
-- The three `*-subagent` skills share an identical handoff contract and an identical `delegate.sh` flag interface (`--model / --cwd / --resume / --timeout / --save-default / --wait / --poll-timeout`) by convention, not by shared code. When editing either in one skill, apply the same edit to all three.
+- The three `*-subagent` skills share a core `delegate.sh` flag interface (`--model / --cwd / --resume / --timeout / --save-default / --wait / --poll-timeout`) and job-state layout by convention, not by shared code. When changing any of those, apply the same edit to all three.
+- `opencode-subagent` additionally exposes explicit operations (`start / run / status / wait / resume / cancel / policy`), `--json`, and a delegation policy. Those are deliberately not mirrored in the other two yet; the legacy flag forms above still work identically everywhere.
+- A skill may ship OpenCode agent definitions in `skills/<name>/agents/*.md`. `scripts/install.sh --agent opencode` installs them into `~/.config/opencode/agent/`, and `opencode-subagent/scripts/delegate.sh` re-syncs its own before every launch. `opencode run --agent NAME` falls back to the unconstrained default agent with only a warning when the name is unknown, so the definition must be on disk before launching.
 
 ## Before you finish
 

@@ -100,6 +100,7 @@ if [ "${1:-}" = "db" ]; then
   exit 0
 fi
 echo "stub banner noise (must stay out of raw.jsonl)" >&2
+case "$*" in *touch-artifact*) : >"$PWD/worker-artifact.txt" ;; esac
 turn="$$-$RANDOM"
 rm -f "${STUB_DIR}/opencode-final.id"
 printf 'msg_oc_assistant_%s\n' "$turn" >"${STUB_DIR}/opencode-assistant.id"
@@ -124,6 +125,56 @@ STUB
 chmod +x "$stub_dir/opencode"
 
 oc="$repo_root/skills/opencode-subagent/scripts/delegate.sh"
+oc_agent="$stub_dir/config/opencode/agent/workflow-worker.md"
+
+# --- delegation policy ------------------------------------------------------
+
+# an unconfigured conf is conservative, not permissive
+out="$(run_delegate "$oc" policy)"
+echo "$out" | grep -q '^DELEGATION_POLICY: explicit$' || fail "opencode: default policy is not explicit: $out"
+echo "$out" | grep -q '^WORKER_MODEL: none$' || fail "opencode: unset worker model not reported: $out"
+
+# the policy is settable and readable as JSON
+run_delegate "$oc" policy auto >/dev/null
+run_delegate "$oc" policy --json | jq -e '.delegation_policy == "auto"' >/dev/null \
+  || fail "opencode: policy auto not persisted"
+
+# policy=off refuses to launch at all
+run_delegate "$oc" policy off >/dev/null
+set +e
+msg="$(run_delegate "$oc" --model x/y "task" 2>&1)"
+code=$?
+set -e
+[ "$code" -eq 2 ] || fail "opencode: policy off should exit 2, got $code"
+echo "$msg" | grep -q 'delegation is disabled' || fail "opencode: policy off lacks actionable error: $msg"
+
+# an invalid policy is a config error, not a silent default
+echo 'OPENCODE_SUBAGENT_DELEGATION_POLICY=sometimes' >"$conf_file"
+set +e
+run_delegate "$oc" --model x/y "task" >/dev/null 2>&1
+code=$?
+set -e
+[ "$code" -eq 2 ] || fail "opencode: invalid policy should exit 2, got $code"
+
+# policy=explicit permits launching
+run_delegate "$oc" policy explicit >/dev/null
+
+# --- worker model resolution ------------------------------------------------
+
+# with no --model and no configured worker model the launch fails loudly:
+# inheriting OpenCode's global default would defeat the point of the skill
+set +e
+msg="$(run_delegate "$oc" "task" 2>&1)"
+code=$?
+set -e
+[ "$code" -eq 2 ] || fail "opencode: missing worker model should exit 2, got $code"
+echo "$msg" | grep -q 'no worker model' || fail "opencode: missing-model error unclear: $msg"
+
+# from here on a worker model is configured, so launches need not name one
+mkdir -p "$(dirname "$conf_file")"
+echo 'OPENCODE_SUBAGENT_MODEL=stub/conf-model' >"$conf_file"
+
+# --- launch / wait ----------------------------------------------------------
 
 # launch returns immediately and prints the job block
 out="$(run_delegate "$oc" --model anthropic/claude-haiku-4-5 "do the thing")"
@@ -135,9 +186,13 @@ echo "$out" | grep -q '^PROVIDER_REPORT:' || fail "opencode: no PROVIDER_REPORT 
 echo "$out" | grep -q '^RESULT:' || fail "opencode: no RESULT line: $out"
 job="$(job_of "$out")"
 
+# the dedicated worker agent is installed where opencode can resolve it
+[ -f "$oc_agent" ] || fail "opencode: worker agent not synced to $oc_agent"
+grep -q '^name: workflow-worker$' "$oc_agent" || fail "opencode: synced agent is not workflow-worker"
+
 # wait returns the normalized result once the job finishes, exit 0
 res="$(run_delegate "$oc" --wait "$job" --poll-timeout 30)"
-grep -q 'run --format json --model anthropic/claude-haiku-4-5 do the thing' "$stub_dir/opencode.args" \
+grep -q 'run --format json --agent workflow-worker --model anthropic/claude-haiku-4-5 do the thing' "$stub_dir/opencode.args" \
   || fail "opencode: unexpected args: $(cat "$stub_dir/opencode.args")"
 echo "$res" | grep -q '^SESSION: ses_oc1$' || fail "opencode: session not extracted: $res"
 echo "$res" | grep -q '^COST: 0.0042$' || fail "opencode: cost not extracted: $res"
@@ -203,13 +258,17 @@ count="$(grep -c '^OPENCODE_SUBAGENT_MODEL=' "$conf_file")"
 [ "$count" -eq 1 ] || fail "opencode: conf key duplicated (count=$count)"
 grep -q '^OPENCODE_SUBAGENT_MODEL=saved/model$' "$conf_file" || fail "opencode: --save-default not written"
 
-# no model named and no conf -> no --model flag at all
+# with no model anywhere the CLI is never reached: no silent fall back to
+# whatever model opencode happens to be configured with globally
 rm -f "$conf_file"
 : >"$stub_dir/opencode.args"
-launch_and_wait "$oc" "plain task" >/dev/null
-if grep -q -- '--model' "$stub_dir/opencode.args"; then
-  fail "opencode: passed --model the user did not request"
-fi
+set +e
+run_delegate "$oc" "plain task" >/dev/null 2>&1
+code=$?
+set -e
+[ "$code" -eq 2 ] || fail "opencode: unconfigured launch should exit 2, got $code"
+[ ! -s "$stub_dir/opencode.args" ] || fail "opencode: invoked the CLI without a resolved worker model"
+echo 'OPENCODE_SUBAGENT_MODEL=stub/conf-model' >"$conf_file"
 
 # resume maps to --session
 : >"$stub_dir/opencode.args"
@@ -295,6 +354,103 @@ code=$?
 set -e
 [ "$code" -eq 127 ] || fail "opencode: missing CLI should exit 127, got $code"
 echo "$msg" | grep -q 'doctor' || fail "opencode: missing-CLI error should mention --doctor: $msg"
+
+# --- explicit operations ----------------------------------------------------
+
+# `start` is the async half of the API and matches the legacy launch form
+: >"$stub_dir/opencode.args"
+out="$(STUB_SLEEP=4 run_delegate "$oc" start --model async/model "async task")"
+job="$(job_of "$out")"
+[ -n "$job" ] || fail "opencode: start printed no job id: $out"
+
+# `status` reports the running job without blocking on it
+set +e
+res="$(run_delegate "$oc" status "$job")"
+code=$?
+set -e
+[ "$code" -eq 3 ] || fail "opencode: status of a running job should exit 3, got $code"
+echo "$res" | grep -q '^RUNNING' || fail "opencode: status of a running job lacks RUNNING: $res"
+
+# ... and `wait` then blocks until it is done
+res="$(run_delegate "$oc" wait "$job" --poll-timeout 30)"
+echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: start/wait flow did not finish clean: $res"
+set +e
+res="$(run_delegate "$oc" status "$job")"
+code=$?
+set -e
+[ "$code" -eq 0 ] || fail "opencode: status of a finished job should exit 0, got $code"
+echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: status of a finished job lacks the result: $res"
+
+# `run` blocks and returns the result in one call
+: >"$stub_dir/opencode.args"
+res="$(run_delegate "$oc" run --model blocking/model "blocking task")"
+echo "$res" | grep -q '^JOB: opencode-' || fail "opencode: run did not report its job id: $res"
+echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: run did not block through completion: $res"
+echo "$res" | grep -q 'verification passed' || fail "opencode: run lost the report: $res"
+grep -q -- '--model blocking/model' "$stub_dir/opencode.args" || fail "opencode: run dropped --model"
+
+# `resume SESSION "<fix>"` continues the same session rather than starting over
+: >"$stub_dir/opencode.args"
+out="$(run_delegate "$oc" resume ses_oc1 "fix: narrow correction")"
+job="$(job_of "$out")"
+run_delegate "$oc" wait "$job" --poll-timeout 30 >/dev/null
+grep -q -- '--session ses_oc1 fix: narrow correction' "$stub_dir/opencode.args" \
+  || fail "opencode: resume operation did not reuse the session: $(cat "$stub_dir/opencode.args")"
+
+# `resume` without a session id is a usage error
+if run_delegate "$oc" resume >/dev/null 2>&1; then
+  fail "opencode: resume without a session id should exit nonzero"
+fi
+
+# `cancel` stops a running job and reports it as cancelled
+out="$(STUB_SLEEP=30 run_delegate "$oc" start "long task")"
+job="$(job_of "$out")"
+set +e
+res="$(run_delegate "$oc" cancel "$job")"
+code=$?
+set -e
+[ "$code" -eq 130 ] || fail "opencode: cancel should exit 130, got $code"
+grep -q '^cancelled 130' "$(jobdir_of "$job")/status" || fail "opencode: cancelled job status not recorded"
+echo "$res" | grep -q 'Cancelled by the supervisor' || fail "opencode: cancel result unhelpful: $res"
+
+# --- machine-readable output ------------------------------------------------
+
+# start --json describes the running job
+out="$(run_delegate "$oc" start --json --model json/model "json task")"
+echo "$out" | jq -e '.state == "running"' >/dev/null || fail "opencode: start --json state wrong: $out"
+echo "$out" | jq -e '.model == "json/model"' >/dev/null || fail "opencode: start --json model wrong: $out"
+echo "$out" | jq -e '.agent == "workflow-worker"' >/dev/null || fail "opencode: start --json agent wrong: $out"
+echo "$out" | jq -e '.session_id == null' >/dev/null || fail "opencode: start --json session should be null: $out"
+echo "$out" | jq -e '.job_id | startswith("opencode-")' >/dev/null || fail "opencode: start --json job_id wrong: $out"
+echo "$out" | jq -e '.cwd != null' >/dev/null || fail "opencode: start --json cwd missing: $out"
+job="$(echo "$out" | jq -r .job_id)"
+
+# wait --json describes the completed job
+res="$(run_delegate "$oc" wait "$job" --json --poll-timeout 30)"
+echo "$res" | jq -e '.state == "completed"' >/dev/null || fail "opencode: wait --json state wrong: $res"
+echo "$res" | jq -e '.exit_code == 0' >/dev/null || fail "opencode: wait --json exit_code wrong: $res"
+echo "$res" | jq -e '.session_id == "ses_oc1"' >/dev/null || fail "opencode: wait --json session wrong: $res"
+echo "$res" | jq -e '.cost_usd == 0.0042' >/dev/null || fail "opencode: wait --json cost wrong: $res"
+echo "$res" | jq -e '.report | test("verification passed")' >/dev/null || fail "opencode: wait --json report wrong: $res"
+echo "$res" | jq -e '.changed_files | type == "array"' >/dev/null || fail "opencode: wait --json changed_files not an array: $res"
+
+# the JSON surface also carries failure states
+out="$(STUB_NO_FINAL=1 run_delegate "$oc" start --json "incomplete json")"
+job="$(echo "$out" | jq -r .job_id)"
+set +e
+res="$(STUB_NO_FINAL=1 run_delegate "$oc" wait "$job" --json --poll-timeout 30)"
+code=$?
+set -e
+[ "$code" -eq 4 ] || fail "opencode: json wait on incomplete turn should exit 4, got $code"
+echo "$res" | jq -e '.state == "incomplete"' >/dev/null || fail "opencode: incomplete state missing from JSON: $res"
+
+# changed_files reports what the worker touched in the worktree
+work_repo="$stub_dir/work"
+mkdir -p "$work_repo"
+git -C "$work_repo" init -q
+res="$(cd "$work_repo" && run_delegate "$oc" run --json "touch-artifact")"
+echo "$res" | jq -e '.changed_files | index("worker-artifact.txt")' >/dev/null \
+  || fail "opencode: changed_files did not report the worker's new file: $res"
 
 # --- stub: claude -----------------------------------------------------------
 cat >"$stub_dir/claude" <<'STUB'

@@ -22,6 +22,13 @@ assert_skill_installed "$tmp_home/.agents/skills" report-changes
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent opencode >/dev/null
 assert_skill_installed "$tmp_home/.config/opencode/skills" report-changes
 
+# the opencode target also installs agent definitions shipped by skills,
+# otherwise `opencode run --agent NAME` falls back to the default agent
+worker="$tmp_home/.config/opencode/agent/workflow-worker.md"
+[ -e "$worker" ] || { echo "FAIL  expected $worker" >&2; exit 1; }
+grep -q '^name: workflow-worker$' "$worker" \
+  || { echo "FAIL  $worker is not the worker agent definition" >&2; exit 1; }
+
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent gemini >/dev/null
 assert_skill_installed "$tmp_home/.gemini/skills" report-changes
 
@@ -73,6 +80,10 @@ if [ -e "$tmp_home/.claude/settings.json" ]; then
   echo "FAIL  permissions written without consent" >&2
   exit 1
 fi
+
+# --doctor reports the worker agent install state
+out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --doctor)"
+echo "$out" | grep -q 'worker' || { echo "FAIL  --doctor missing worker agent line" >&2; exit 1; }
 
 # --doctor reports on the three CLIs and jq
 out="$("$repo_root/scripts/install.sh" --doctor)"

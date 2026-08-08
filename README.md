@@ -13,7 +13,7 @@ The `skills/` directory is the source of truth and follows the open `SKILL.md` l
 | [claude-subagent](skills/claude-subagent/SKILL.md) | Delegate a verifiable task to a headless Claude Code subagent and verify the result. |
 | [codex-subagent](skills/codex-subagent/SKILL.md) | Delegate a verifiable task to a headless Codex subagent and verify the result. |
 | [follow-plan](skills/follow-plan/SKILL.md) | Executes provided plans exactly, stopping for unresolved decisions instead of improvising or silently deviating. |
-| [opencode-subagent](skills/opencode-subagent/SKILL.md) | Delegate a verifiable task to a headless OpenCode subagent (any provider/model) and verify the result. |
+| [opencode-subagent](skills/opencode-subagent/SKILL.md) | Delegate bounded, mechanically verifiable implementation work to a constrained OpenCode worker running a cheap model, then verify the result independently. |
 | [propose-commit-message](skills/propose-commit-message/SKILL.md) | Proposes a Conventional Commits message for the current work (staged changes if any) without committing. Pairs with report-changes at the end of a task. |
 
 ## Install
@@ -59,7 +59,7 @@ cd workflow-skills
 scripts/install.sh                  # ~/.claude/skills (default)
 scripts/install.sh --agent codex    # ~/.agents/skills and ~/.codex/skills
 scripts/install.sh --agent gemini   # ~/.gemini/skills
-scripts/install.sh --agent opencode # ~/.config/opencode/skills
+scripts/install.sh --agent opencode # ~/.config/opencode/skills (+ agent definitions)
 scripts/install.sh --all            # every known target
 scripts/install.sh --copy           # copy instead of symlink
 scripts/install.sh --dir PATH       # custom skills directory
@@ -77,6 +77,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). In short: copy [templates/skill-template
 .codex-plugin/     Codex plugin manifest
 .agents/plugins/   repo-scoped Codex marketplace
 skills/            one directory per skill, each with a SKILL.md
+                   (optionally scripts/ and agents/ it references)
 templates/         skeleton for authoring new skills
 scripts/           install.sh, lint-skills.sh
 .github/workflows/ CI that lints every skill
