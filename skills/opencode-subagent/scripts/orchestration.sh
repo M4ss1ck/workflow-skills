@@ -14,7 +14,8 @@
 #       meta.json                launch inputs (model, cwd, session, retry_of, reason)
 #       result.json              transport + worker outcome, written when the run ends
 #       raw.jsonl stderr.log provider-progress.json worker-report.txt
-#       changed-files.txt git-before.txt git-after.txt pid launcher.err
+#       changed-files.txt git-before.txt git-after.txt pid process.json
+#       provider.pid provider-process.json launcher.err
 #
 # Invariants:
 #   - task.json is the only cheap-to-query current state; it is never appended to,
@@ -27,11 +28,49 @@
 
 schema_version=2
 lock_held=""
+lock_token=""
 
 # ------------------------------------------------------------------ primitives
 
 now_epoch() { date +%s; }
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || true; }
+
+process_start_time() {
+  local pid="$1"
+  [ -r "/proc/$pid/stat" ] || return 0
+  sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $20}'
+}
+
+process_state() {
+  local pid="$1"
+  [ -r "/proc/$pid/stat" ] || return 0
+  sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $1}'
+}
+
+persist_process_identity() {
+  local dest="$1" pid="$2"
+  jq -n --argjson pid "$pid" --arg boot "$(boot_id)" --arg start "$(process_start_time "$pid")" \
+    '{pid: $pid, boot_id: (if $boot == "" then null else $boot end),
+      start_time: (if $start == "" then null else $start end)}' | write_atomic "$dest"
+}
+
+process_identity_alive() {
+  local file="$1" fallback_pid="${2:-}" pid stored_boot stored_start current_boot current_start
+  [ -f "$file" ] || return 1
+  pid="$(json_read "$file" '.pid // empty')"
+  pid="${pid:-$fallback_pid}"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+  [ "$(process_state "$pid")" != "Z" ] || return 1
+  stored_boot="$(json_read "$file" '.boot_id // empty')"
+  stored_start="$(json_read "$file" '.start_time // empty')"
+  current_boot="$(boot_id)"
+  current_start="$(process_start_time "$pid")"
+  [ -z "$stored_boot" ] || [ -z "$current_boot" ] || [ "$stored_boot" = "$current_boot" ] || return 1
+  [ -z "$stored_start" ] || [ -z "$current_start" ] || [ "$stored_start" = "$current_start" ] || return 1
+  return 0
+}
 
 # Replace a file in one step. Refuses to install an empty payload so a failed
 # producer (jq erroring mid-pipeline) cannot truncate live state.
@@ -42,21 +81,48 @@ write_atomic() {
   mv -f "$tmp" "$dest"
 }
 
-# Coarse per-task mutex. mkdir is atomic on every filesystem we care about and
-# needs no flock. A lock older than ~30s belonged to a process that died holding
-# it, so we break it rather than wedge the supervisor forever.
+# Coarse per-task mutex. mkdir is atomic on every filesystem we care about. The
+# owner PID is published immediately, followed by a boot/process-start
+# fingerprint. A lock is reaped only when that owner is no longer the same live
+# process; elapsed wall time alone never breaks a lock with a published owner.
 lock_acquire() {
-  local dir="$1/.lock" i=0
+  local dir="$1/.lock" owner age self="${BASHPID:-$$}"
+  if [ -n "$lock_held" ]; then
+    [ "$lock_held" = "$dir" ] || { echo "BUG: attempted to nest locks for different Tasks" >&2; return 1; }
+    return 0
+  fi
   while ! mkdir "$dir" 2>/dev/null; do
-    i=$((i + 1))
-    if [ "$i" -ge 300 ]; then rm -rf "$dir" 2>/dev/null || true; i=0; fi
+    owner="$(cat "$dir/owner.pid" 2>/dev/null || true)"
+    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+      if [ -f "$dir/process.json" ] && ! process_identity_alive "$dir/process.json" "$owner"; then
+        rm -rf "$dir" 2>/dev/null || true
+        continue
+      fi
+      sleep 0.1
+      continue
+    fi
+    age="$(file_age_seconds "$dir")"
+    if [ -n "$owner" ] || { [ "$age" != "null" ] && [ "$age" -ge 30 ]; }; then
+      rm -rf "$dir" 2>/dev/null || true
+      continue
+    fi
     sleep 0.1
   done
+  lock_token="$self-$(now_epoch)-$RANDOM"
+  printf '%s\n' "$self" >"$dir/owner.pid"
+  printf '%s\n' "$lock_token" >"$dir/owner.token"
+  persist_process_identity "$dir/process.json" "$self"
   lock_held="$dir"
 }
 
 lock_release() {
-  if [ -n "$lock_held" ]; then rmdir "$lock_held" 2>/dev/null || true; lock_held=""; fi
+  local held="$lock_held"
+  if [ -n "$held" ] && [ "$(cat "$held/owner.token" 2>/dev/null || true)" = "$lock_token" ]; then
+    rm -f "$held/owner.pid" "$held/owner.token" "$held/process.json"
+    rmdir "$held" 2>/dev/null || true
+  fi
+  lock_held=""
+  lock_token=""
 }
 
 trap 'lock_release' EXIT
@@ -67,15 +133,24 @@ json_read() { jq -r "$2" "$1" 2>/dev/null || true; }
 
 # event_append TASKDIR TYPE [PAYLOAD_JSON]
 event_append() {
-  local dir="$1" type="$2" payload="${3:-{\}}" own=0 seq
+  local dir="$1" type="$2" payload="${3:-{\}}" own=0 seq line
   if [ -z "$lock_held" ]; then lock_acquire "$dir"; own=1; fi
-  seq=$(( $(wc -l <"$dir/events.jsonl" 2>/dev/null || echo 0) + 1 ))
-  jq -c -n \
+  [ "$lock_held" = "$dir/.lock" ] || { echo "BUG: event append without the matching Task lock" >&2; return 1; }
+  seq="$(tail -n 1 "$dir/events.jsonl" 2>/dev/null | jq -r '.seq // 0' 2>/dev/null || echo 0)"
+  case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
+  seq=$((seq + 1))
+  line="$(jq -c -n \
     --argjson seq "$seq" \
     --arg ts "$(now_iso)" \
     --arg type "$type" \
     --argjson payload "$payload" \
-    '{seq: $seq, ts: $ts, type: $type} + $payload' >>"$dir/events.jsonl"
+    '$payload + {seq: $seq, ts: $ts, type: $type}')" || {
+      if [ "$own" -eq 1 ]; then lock_release; fi
+      return 1
+    }
+  # One compact line and one append write: concurrent appenders are serialized
+  # by the Task lock, and a signal cannot strand jq's partially streamed output.
+  printf '%s\n' "$line" >>"$dir/events.jsonl"
   if [ "$own" -eq 1 ]; then lock_release; fi
 }
 
@@ -179,12 +254,14 @@ report_section() {
 
 # parse_worker_report REPORT_FILE -> JSON {worker, files_changed, verification, concerns, question}
 parse_worker_report() {
-  local file="$1" raw status files verification concerns question
-  raw="$(report_section "$file" STATUS | head -1 | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
+  local file="$1" raw status files verification concerns question status_count
+  status_count="$(awk '/^[[:space:]]*STATUS:[[:space:]]*/ { n++ } END { print n + 0 }' "$file" 2>/dev/null || echo 0)"
+  raw="$(report_section "$file" STATUS | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:lower:]' '[:upper:]')"
+  if [ "$status_count" -ne 1 ]; then raw=""; fi
   case "$raw" in
-    DONE_WITH_CONCERNS*) status="done_with_concerns" ;;
-    DONE*)               status="done" ;;
-    BLOCKED*)            status="blocked" ;;
+    DONE_WITH_CONCERNS) status="done_with_concerns" ;;
+    DONE)               status="done" ;;
+    BLOCKED)            status="blocked" ;;
     *)                   status="no_report" ;;
   esac
   files="$(report_section "$file" FILES_CHANGED | sed -n 's/^[[:space:]]*-[[:space:]]*//p')"
@@ -287,16 +364,45 @@ attempt_id_for() { printf 'attempt_%03d' "$1"; }
 
 attempt_pid() { cat "$1/pid" 2>/dev/null || true; }
 
+attempt_provider_pid() { cat "$1/provider.pid" 2>/dev/null || true; }
+
 attempt_alive() {
   local pid
   pid="$(attempt_pid "$1")"
+  if [ -n "$pid" ]; then
+    if [ -f "$1/process.json" ]; then
+      process_identity_alive "$1/process.json" "$pid" && return 0
+    elif kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  pid="$(attempt_provider_pid "$1")"
   [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null
+  if [ -f "$1/provider-process.json" ]; then
+    process_identity_alive "$1/provider-process.json" "$pid"
+  else
+    kill -0 "$pid" 2>/dev/null
+  fi
+}
+
+# Signal both the detached supervisor runner and the provider command it owns.
+# The latter has its own process group when setsid is available; the direct-PID
+# fallback covers platforms without it.
+attempt_signal() {
+  local dir="$1" sig="$2" pid
+  pid="$(attempt_pid "$dir")"
+  if [ -n "$pid" ] && { [ ! -f "$dir/process.json" ] || process_identity_alive "$dir/process.json" "$pid"; }; then
+    kill -"$sig" -- "-$pid" 2>/dev/null || kill -"$sig" "$pid" 2>/dev/null || true
+  fi
+  pid="$(attempt_provider_pid "$dir")"
+  if [ -n "$pid" ] && { [ ! -f "$dir/provider-process.json" ] || process_identity_alive "$dir/provider-process.json" "$pid"; }; then
+    kill -"$sig" -- "-$pid" 2>/dev/null || kill -"$sig" "$pid" 2>/dev/null || true
+  fi
 }
 
 file_age_seconds() {
   local f="$1" mtime
-  [ -f "$f" ] || { echo null; return 0; }
+  [ -e "$f" ] || { echo null; return 0; }
   mtime="$(date -r "$f" +%s 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo "")"
   if [ -z "$mtime" ]; then echo null; else echo $(( $(now_epoch) - mtime )); fi
 }
@@ -403,17 +509,23 @@ attempt_register() {
 # Returns 1 (and marks the attempt non-authoritative) if a newer attempt took
 # over or the supervisor already closed the Task.
 attempt_finalize() {
-  local task_dir="$1" id="$2" own=0 current terminal=0 authoritative=true
+  local task_dir="$1" id="$2" own=0 current terminal=0 authoritative=true finalized
   local adir transport worker session cost event
   adir="$(attempt_dir "$task_dir" "$id")"
   if [ -z "$lock_held" ]; then lock_acquire "$task_dir"; own=1; fi
 
+  finalized="$(json_read "$adir/result.json" '.authoritative')"
+  if [ "$finalized" = "false" ] \
+    || { [ "$finalized" = "true" ] \
+      && { [ "$(task_state "$task_dir")" != "running" ] \
+        || [ "$(json_read "$task_dir/task.json" '.current_attempt')" != "$id" ]; }; }; then
+    if [ "$own" -eq 1 ]; then lock_release; fi
+    return 0
+  fi
+
   current="$(json_read "$task_dir/task.json" '.current_attempt')"
   task_is_terminal "$task_dir" && terminal=1
   if [ "$current" != "$id" ] || [ "$terminal" -eq 1 ]; then authoritative=false; fi
-
-  jq --argjson auth "$authoritative" '.authoritative = $auth' "$adir/result.json" \
-    | write_atomic "$adir/result.json"
 
   transport="$(json_read "$adir/result.json" '.transport')"
   worker="$(json_read "$adir/result.json" '.worker')"
@@ -421,11 +533,15 @@ attempt_finalize() {
   cost="$(json_read "$adir/result.json" '.cost_usd')"
 
   if [ "$authoritative" != "true" ]; then
-    event_append "$task_dir" attempt_stale \
-      "$(jq -c -n --arg attempt "$id" --arg current "$current" --arg transport "$transport" \
-        --arg worker "$worker" \
-        '{attempt: $attempt, superseded_by: $current, transport: $transport, worker: $worker,
-          note: "finished after the Task moved on; Task state left untouched"}')"
+    if ! jq -e --arg attempt "$id" 'select(.type == "attempt_stale" and .attempt == $attempt)' \
+      "$task_dir/events.jsonl" >/dev/null 2>&1; then
+      event_append "$task_dir" attempt_stale \
+        "$(jq -c -n --arg attempt "$id" --arg current "$current" --arg transport "$transport" \
+          --arg worker "$worker" \
+          '{attempt: $attempt, superseded_by: $current, transport: $transport, worker: $worker,
+            note: "finished after the Task moved on; Task state left untouched"}')"
+    fi
+    jq '.authoritative = false' "$adir/result.json" | write_atomic "$adir/result.json"
     if [ "$own" -eq 1 ]; then lock_release; fi
     return 0
   fi
@@ -447,12 +563,16 @@ attempt_finalize() {
     --arg cost "${cost:-}"
 
   event="$(attempt_event_for "$transport" "$worker")"
-  event_append "$task_dir" "$event" \
-    "$(jq -c -n --arg attempt "$id" --slurpfile r "$adir/result.json" \
-      '{attempt: $attempt, transport: $r[0].transport, worker: $r[0].worker,
-        exit_code: $r[0].exit_code, session_id: $r[0].session_id,
-        failure_class: $r[0].failure_class, recommended_action: $r[0].recommended_action,
-        question: $r[0].worker_question, changed_files: ($r[0].changed_files | length)}')"
+  if ! jq -e --arg attempt "$id" --arg type "$event" \
+    'select(.type == $type and .attempt == $attempt)' "$task_dir/events.jsonl" >/dev/null 2>&1; then
+    event_append "$task_dir" "$event" \
+      "$(jq -c -n --arg attempt "$id" --slurpfile r "$adir/result.json" \
+        '{attempt: $attempt, transport: $r[0].transport, worker: $r[0].worker,
+          exit_code: $r[0].exit_code, session_id: $r[0].session_id,
+          failure_class: $r[0].failure_class, recommended_action: $r[0].recommended_action,
+          question: $r[0].worker_question, changed_files: ($r[0].changed_files | length)}')"
+  fi
+  jq '.authoritative = true' "$adir/result.json" | write_atomic "$adir/result.json"
 
   if [ "$own" -eq 1 ]; then lock_release; fi
   return 0
@@ -474,30 +594,55 @@ verification_next_id() {
 
 # reconcile_task TASKDIR -> prints one of: ok | finalized | interrupted | running
 reconcile_task() {
-  local task_dir="$1" state current adir
+  local task_dir="$1" state current adir a reconciled=0
+  lock_acquire "$task_dir"
+  # Finish any result whose runner crashed before recording whether it was the
+  # authoritative Attempt. This also fences old Attempts after a retry.
+  for a in "$task_dir"/attempts/attempt_*/; do
+    [ -f "${a}result.json" ] || continue
+    [ "$(json_read "${a}result.json" '.authoritative')" = "null" ] || continue
+    current="$(basename "${a%/}")"
+    if ! jq -e --arg attempt "$current" \
+      'select(.type == "task_reconciled" and .attempt == $attempt)' \
+      "$task_dir/events.jsonl" >/dev/null 2>&1; then
+      event_append "$task_dir" task_reconciled \
+        "$(jq -c -n --arg attempt "$current" '{attempt: $attempt, finding: "result_not_folded_in"}')"
+    fi
+    attempt_finalize "$task_dir" "$current" >/dev/null
+    reconciled=1
+  done
   state="$(task_state "$task_dir")"
-  [ "$state" = "running" ] || { echo ok; return 0; }
+  if [ "$state" != "running" ]; then
+    lock_release
+    if [ "$reconciled" -eq 1 ]; then echo finalized; else echo ok; fi
+    return 0
+  fi
   current="$(json_read "$task_dir/task.json" '.current_attempt')"
-  [ -n "$current" ] && [ "$current" != "null" ] || { echo ok; return 0; }
+  if [ -z "$current" ] || [ "$current" = "null" ]; then lock_release; echo ok; return 0; fi
   adir="$(attempt_dir "$task_dir" "$current")"
 
   if [ -f "$adir/result.json" ]; then
-    # The runner finished but never folded its result into the Task.
+    if ! jq -e --arg attempt "$current" \
+      'select(.type == "task_reconciled" and .attempt == $attempt)' \
+      "$task_dir/events.jsonl" >/dev/null 2>&1; then
+      event_append "$task_dir" task_reconciled \
+        "$(jq -c -n --arg attempt "$current" '{attempt: $attempt, finding: "result_not_folded_in"}')"
+    fi
     attempt_finalize "$task_dir" "$current" >/dev/null
-    event_append "$task_dir" task_reconciled \
-      "$(jq -c -n --arg attempt "$current" '{attempt: $attempt, finding: "result_not_folded_in"}')"
+    lock_release
     echo finalized
     return 0
   fi
 
-  if attempt_alive "$adir"; then echo running; return 0; fi
+  if attempt_alive "$adir"; then lock_release; echo running; return 0; fi
 
   # No result and no process: the run was interrupted. Record what we have
   # rather than inventing an outcome for it.
   attempt_write_result "$adir" "" "" "" 1 failed interrupted inspect_diff
-  attempt_finalize "$task_dir" "$current" >/dev/null
   event_append "$task_dir" task_reconciled \
     "$(jq -c -n --arg attempt "$current" '{attempt: $attempt, finding: "process_gone_without_result"}')"
+  attempt_finalize "$task_dir" "$current" >/dev/null
+  lock_release
   echo interrupted
 }
 

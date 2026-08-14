@@ -199,15 +199,45 @@ echo "$msg" | grep -q 'no worker model' || fail "opencode: missing-model error u
 mkdir -p "$(dirname "$conf_file")"
 echo 'OPENCODE_SUBAGENT_MODEL=stub/conf-model' >"$conf_file"
 
+# retention never removes unresolved Tasks or any sibling provider's state
+ret_active="$(taskdir_of task_retention_active)"
+ret_done="$(taskdir_of task_retention_done)"
+ret_sibling="$(jobdir_of claude-retention-sibling)"
+mkdir -p "$ret_active/attempts/attempt_001" "$ret_done/attempts/attempt_001" "$ret_sibling"
+printf '{"state":"running"}\n' >"$ret_active/task.json"
+printf '{"state":"accepted"}\n' >"$ret_done/task.json"
+: >"$ret_active/attempts/attempt_001/raw.jsonl"
+: >"$ret_done/attempts/attempt_001/raw.jsonl"
+: >"$ret_sibling/status"
+touch -d '3 days ago' "$ret_active/task.json" "$ret_active/attempts/attempt_001/raw.jsonl" \
+  "$ret_done/task.json" "$ret_done/attempts/attempt_001/raw.jsonl" "$ret_sibling"
+printf 'OPENCODE_SUBAGENT_RETENTION_DAYS=0\nOPENCODE_SUBAGENT_RAW_RETENTION_DAYS=0\n' >>"$conf_file"
+ret_out="$(run_delegate "$oc" start "retention trigger")"
+ret_task="$(task_of "$ret_out")"
+[ -f "$ret_active/task.json" ] && [ -f "$ret_active/attempts/attempt_001/raw.jsonl" ] \
+  || fail "opencode: retention pruned unresolved Task evidence"
+[ ! -e "$ret_done" ] || fail "opencode: retention did not prune an old terminal Task"
+[ -e "$ret_sibling/status" ] || fail "opencode: retention touched sibling provider state"
+run_delegate "$oc" wait "$ret_task" --poll-timeout 30 >/dev/null
+run_delegate "$oc" decide "$ret_task" accept --reason "retention fixture complete" >/dev/null
+rm -rf "$ret_active" "$ret_sibling"
+# Restore defaults for the remaining tests.
+grep -v '^OPENCODE_SUBAGENT_.*RETENTION_DAYS=' "$conf_file" >"$conf_file.tmp"
+mv "$conf_file.tmp" "$conf_file"
+
 # --- Task and Attempt creation ----------------------------------------------
 
 # launch returns immediately and names both the Task and its first Attempt
 out="$(run_delegate "$oc" --model anthropic/claude-haiku-4-5 "do the thing")"
 echo "$out" | grep -q '^TASK: task_' || fail "opencode: no TASK line: $out"
+echo "$out" | grep -q '^JOB: task_' || fail "opencode: legacy JOB alias missing: $out"
 echo "$out" | grep -q '^ATTEMPT: attempt_001$' || fail "opencode: no ATTEMPT line: $out"
 echo "$out" | grep -q '^WATCH:' || fail "opencode: no WATCH line: $out"
+echo "$out" | grep -q '^STATUS:' || fail "opencode: legacy STATUS guidance missing: $out"
 echo "$out" | grep -q '^PROGRESS:' || fail "opencode: no PROGRESS line: $out"
 echo "$out" | grep -q '^REPORT:' || fail "opencode: no REPORT line: $out"
+echo "$out" | grep -q '^PROVIDER_REPORT:' || fail "opencode: legacy PROVIDER_REPORT alias missing: $out"
+echo "$out" | grep -q '^RESULT:' || fail "opencode: legacy RESULT alias missing: $out"
 task="$(task_of "$out")"
 td="$(taskdir_of "$task")"
 
@@ -246,6 +276,30 @@ jq -e '.worker == "done" and .worker_files_changed == ["foo.txt"]' \
   "$td/attempts/attempt_001/result.json" >/dev/null \
   || fail "opencode: worker report not parsed into result.json"
 grep -q '"type":"worker_done"' "$td/events.jsonl" || fail "opencode: no worker_done event"
+[ -f "$td/attempts/attempt_001/process.json" ] \
+  || fail "opencode: process fingerprint was not persisted"
+jq -e '.pid > 0 and .boot_id != null and .start_time != null' "$td/attempts/attempt_001/process.json" >/dev/null \
+  || fail "opencode: process fingerprint is incomplete"
+[ -f "$td/attempts/attempt_001/provider-process.json" ] \
+  || fail "opencode: provider process fingerprint was not persisted"
+
+# malformed, missing, or ambiguous STATUS blocks are never promoted to success
+printf 'STATUS: DONE later\n' >"$stub_dir/bad-report.txt"
+bad="$(STUB_DIR="$stub_dir" bash -c '
+  state_root=/dev/null; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  parse_worker_report "'"$stub_dir"'/bad-report.txt"
+')"
+echo "$bad" | jq -e '.worker == "no_report"' >/dev/null \
+  || fail "opencode: malformed STATUS was trusted: $bad"
+printf 'STATUS: DONE\nSTATUS: BLOCKED\nQUESTION:\nWhich one?\n' >"$stub_dir/bad-report.txt"
+bad="$(STUB_DIR="$stub_dir" bash -c '
+  state_root=/dev/null; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  parse_worker_report "'"$stub_dir"'/bad-report.txt"
+')"
+echo "$bad" | jq -e '.worker == "no_report"' >/dev/null \
+  || fail "opencode: multiple STATUS values were trusted: $bad"
 
 # a DONE worker is not an accepted task
 jq -e '.state == "awaiting_supervisor" and .outcome.supervisor == "pending"' "$td/task.json" >/dev/null \
@@ -392,28 +446,128 @@ jq -e '.state == "taken_over"' "$(taskdir_of "$rejected")/task.json" >/dev/null 
 grep -q '"type":"supervisor_takeover"' "$(taskdir_of "$rejected")/events.jsonl" \
   || fail "opencode: no supervisor_takeover event"
 
-# --- a stale Attempt cannot finalize a Task that moved on --------------------
+# --- concurrent retry creation and stale-Attempt fencing ---------------------
 
 fence_task="$(run_delegate "$oc" run --json "fencing" | jq -r .task_id)"
 fd="$(taskdir_of "$fence_task")"
-# forge a second attempt as the authoritative one, then let attempt_001 finish late
-cp -R "$fd/attempts/attempt_001" "$fd/attempts/attempt_002"
-rm -f "$fd/attempts/attempt_002/result.json" "$fd/attempts/attempt_002/pid"
-jq '.current_attempt = "attempt_002" | .attempt_count = 2 | .state = "running"
-    | .outcome.transport = "running" | .outcome.worker = "pending"' "$fd/task.json" >"$fd/task.json.new"
-mv "$fd/task.json.new" "$fd/task.json"
+# Model the exact crash window where attempt_001 wrote result.json but had not
+# yet fenced itself, then race its detached finalizer against a real retry.
+jq '.authoritative = null' "$fd/attempts/attempt_001/result.json" >"$fd/attempts/attempt_001/result.json.new"
+mv "$fd/attempts/attempt_001/result.json.new" "$fd/attempts/attempt_001/result.json"
 STUB_DIR="$stub_dir" XDG_STATE_HOME="$stub_dir/state" bash -c '
   set -euo pipefail
   state_root="'"$stub_dir"'/state/workflow-skills/subagents"
   agent_name=workflow-worker
   . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  while [ "$(json_read "'"$fd"'/task.json" .current_attempt)" != attempt_002 ]; do sleep 0.01; done
   attempt_finalize "'"$fd"'" attempt_001
-' >/dev/null
+' >/dev/null &
+stale_finalizer=$!
+out="$(STUB_SLEEP=4 run_delegate "$oc" retry "$fence_task" --reason "exercise stale fencing" "second attempt")"
+echo "$out" | grep -q '^ATTEMPT: attempt_002$' || fail "opencode: concurrent retry did not start attempt_002: $out"
+wait "$stale_finalizer"
 jq -e '.authoritative == false' "$fd/attempts/attempt_001/result.json" >/dev/null \
   || fail "opencode: a superseded attempt was still treated as authoritative"
-jq -e '.state == "running" and .outcome.worker == "pending"' "$fd/task.json" >/dev/null \
+jq -e '.current_attempt == "attempt_002" and .state == "running" and .outcome.worker == "pending"' "$fd/task.json" >/dev/null \
   || fail "opencode: a stale attempt overwrote current Task state"
 grep -q '"type":"attempt_stale"' "$fd/events.jsonl" || fail "opencode: stale finish not recorded in history"
+run_delegate "$oc" wait "$fence_task" --poll-timeout 30 >/dev/null
+
+# Two supervisor retries serialize on the Task lock: exactly one creates the
+# next Attempt and the loser observes that it is already running.
+set +e
+( STUB_SLEEP=4 run_delegate "$oc" retry "$fence_task" --reason "concurrent retry A" "third attempt A" >"$stub_dir/retry-a.out" 2>&1; echo $? >"$stub_dir/retry-a.code" ) &
+retry_a=$!
+( STUB_SLEEP=4 run_delegate "$oc" retry "$fence_task" --reason "concurrent retry B" "third attempt B" >"$stub_dir/retry-b.out" 2>&1; echo $? >"$stub_dir/retry-b.code" ) &
+retry_b=$!
+wait "$retry_a"
+wait "$retry_b"
+set -e
+codes="$(sort "$stub_dir/retry-a.code" "$stub_dir/retry-b.code" | tr '\n' ' ')"
+[ "$codes" = "0 2 " ] || fail "opencode: concurrent retries did not produce one winner (codes: $codes)"
+jq -e '.attempt_count == 3 and .current_attempt == "attempt_003" and .state == "running"' "$fd/task.json" >/dev/null \
+  || fail "opencode: concurrent retries corrupted Task state: $(cat "$fd/task.json")"
+[ "$(find "$fd/attempts" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 3 ] \
+  || fail "opencode: concurrent retries created duplicate/corrupt attempt directories"
+run_delegate "$oc" wait "$fence_task" --poll-timeout 30 >/dev/null
+
+# A lock's age cannot evict a live owner. The contender must wait until the
+# holder releases even after the lock directory is made artificially old.
+rm -f "$stub_dir/lock-ready" "$stub_dir/lock-acquired"
+STUB_DIR="$stub_dir" bash -c '
+  set -euo pipefail
+  state_root="'"$stub_dir"'/state/workflow-skills/subagents"; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  trap "exit 143" TERM
+  lock_acquire "'"$fd"'"
+  touch -d "2 minutes ago" "'"$fd"'/.lock"
+  : >"'"$stub_dir"'/lock-ready"
+  sleep 3
+  lock_release
+' &
+lock_holder=$!
+for _ in {1..30}; do [ -f "$stub_dir/lock-ready" ] && break; sleep 0.1; done
+[ -f "$stub_dir/lock-ready" ] || fail "opencode: lock holder did not start"
+STUB_DIR="$stub_dir" bash -c '
+  set -euo pipefail
+  state_root="'"$stub_dir"'/state/workflow-skills/subagents"; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  lock_acquire "'"$fd"'"
+  : >"'"$stub_dir"'/lock-acquired"
+  lock_release
+' &
+lock_contender=$!
+sleep 1
+[ ! -f "$stub_dir/lock-acquired" ] || fail "opencode: an old but live Task lock was broken"
+wait "$lock_holder"
+wait "$lock_contender"
+[ -f "$stub_dir/lock-acquired" ] || fail "opencode: contender never acquired the released lock"
+
+# Signal cleanup releases a held lock; a reboot/PID-reuse fingerprint mismatch
+# makes an otherwise-live numeric PID stale.
+rm -f "$stub_dir/signal-lock-ready"
+STUB_DIR="$stub_dir" bash -c '
+  set -euo pipefail
+  state_root="'"$stub_dir"'/state/workflow-skills/subagents"; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  trap "exit 143" TERM
+  lock_acquire "'"$fd"'"
+  : >"'"$stub_dir"'/signal-lock-ready"
+  sleep 30
+' &
+signal_holder=$!
+for _ in {1..30}; do [ -f "$stub_dir/signal-lock-ready" ] && break; sleep 0.1; done
+kill -TERM "$signal_holder"
+set +e
+wait "$signal_holder"
+set -e
+[ ! -d "$fd/.lock" ] || fail "opencode: Task lock survived owner signal exit"
+mkdir "$fd/.lock"
+printf '%s\n' "$$" >"$fd/.lock/owner.pid"
+printf 'test-stale\n' >"$fd/.lock/owner.token"
+jq -n --argjson pid "$$" '{pid:$pid,boot_id:"previous-boot",start_time:"1"}' >"$fd/.lock/process.json"
+STUB_DIR="$stub_dir" bash -c '
+  set -euo pipefail
+  state_root="'"$stub_dir"'/state/workflow-skills/subagents"; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  lock_acquire "'"$fd"'"
+  lock_release
+' || fail "opencode: stale fingerprint lock was not recoverable"
+
+# Concurrent event writers preserve valid JSONL and a gap-free unique sequence.
+for i in {1..12}; do
+  STUB_DIR="$stub_dir" bash -c '
+    set -euo pipefail
+    state_root="'"$stub_dir"'/state/workflow-skills/subagents"; agent_name=workflow-worker
+    . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+    event_append "'"$fd"'" audit_probe "$(jq -cn --arg writer "'"$i"'" "{writer:\$writer}")"
+  ' &
+done
+wait
+jq -s -e '([.[].seq] == [range(1; length + 1)]) and ([.[].seq] | unique | length) == length' \
+  "$fd/events.jsonl" >/dev/null || fail "opencode: concurrent event append broke JSONL or event sequences"
+jq -s -e '[.[] | select(.type == "worker_done" and .attempt == "attempt_003")] | length == 1' \
+  "$fd/events.jsonl" >/dev/null || fail "opencode: duplicate terminal event recorded for attempt_003"
 
 # --- liveness, cancellation and recovery -------------------------------------
 
@@ -481,19 +635,52 @@ set -e
 [ "$code" -eq 130 ] || fail "opencode: plain cancel should exit 130, got $code"
 jq -e '.state == "cancelled"' "$(taskdir_of "$task")/task.json" >/dev/null \
   || fail "opencode: plain cancel did not close the Task"
+cancelled_ad="$(taskdir_of "$task")/attempts/attempt_001"
+STUB_DIR="$stub_dir" bash -c '
+  state_root="'"$stub_dir"'/state/workflow-skills/subagents"; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  ! attempt_alive "'"$cancelled_ad"'"
+' || fail "opencode: cancel left the provider process alive"
 
-# an interrupted run is reconciled, not left running forever
+# A vanished detached supervisor does not make its still-running provider dead.
+# Once both processes are gone, recovery records the interrupted Attempt.
 out="$(STUB_SLEEP=30 run_delegate "$oc" start "interrupted")"
 task="$(task_of "$out")"
 td="$(taskdir_of "$task")"
 sleep 2
-kill -9 -- "-$(cat "$td/attempts/attempt_001/pid")" 2>/dev/null || true
+kill -9 "$(cat "$td/attempts/attempt_001/pid")" 2>/dev/null || true
+sleep 1
+run_delegate "$oc" recover --json | jq -e 'map(select(.task_id == "'"$task"'"))[0].reconciliation == "running"' >/dev/null \
+  || fail "opencode: recover ignored a live provider after its supervisor vanished"
+provider_pid="$(cat "$td/attempts/attempt_001/provider.pid")"
+kill -9 -- "-$provider_pid" 2>/dev/null || kill -9 "$provider_pid" 2>/dev/null || true
 sleep 1
 run_delegate "$oc" recover --json | jq -e 'map(select(.task_id == "'"$task"'"))[0].reconciliation == "interrupted"' >/dev/null \
   || fail "opencode: recover did not reconcile the interrupted attempt"
 jq -e '.state == "awaiting_supervisor" and .failure_class == "interrupted"' "$td/task.json" >/dev/null \
   || fail "opencode: interrupted attempt left the Task inconsistent"
 grep -q '"type":"task_reconciled"' "$td/events.jsonl" || fail "opencode: reconciliation not recorded"
+before_recover_events="$(wc -l <"$td/events.jsonl")"
+before_recover_state="$(sha256sum "$td/task.json" | awk '{print $1}')"
+run_delegate "$oc" recover --json >/dev/null
+[ "$(wc -l <"$td/events.jsonl")" -eq "$before_recover_events" ] \
+  || fail "opencode: repeated recover appended duplicate semantic events"
+[ "$(sha256sum "$td/task.json" | awk '{print $1}')" = "$before_recover_state" ] \
+  || fail "opencode: repeated recover mutated already-reconciled Task state"
+
+# kill -0 alone is insufficient: a boot/start fingerprint mismatch is treated
+# as a dead prior process even when that numeric PID is currently alive.
+finger_task="$(run_delegate "$oc" run --json "fingerprint recovery" | jq -r .task_id)"
+finger_dir="$(taskdir_of "$finger_task")"
+rm -f "$finger_dir/attempts/attempt_001/result.json"
+printf '%s\n' "$$" >"$finger_dir/attempts/attempt_001/pid"
+jq -n --argjson pid "$$" '{pid:$pid,boot_id:"previous-boot",start_time:"1"}' \
+  >"$finger_dir/attempts/attempt_001/process.json"
+jq '.state = "running" | .outcome.transport = "running" | .outcome.worker = "pending"' \
+  "$finger_dir/task.json" >"$finger_dir/task.json.new"
+mv "$finger_dir/task.json.new" "$finger_dir/task.json"
+run_delegate "$oc" recover --json | jq -e 'map(select(.task_id == "'"$finger_task"'"))[0].reconciliation == "interrupted"' >/dev/null \
+  || fail "opencode: reboot/PID-reuse fingerprint mismatch was treated as live"
 
 # a result written but never folded in is picked up on the next recover
 out="$(run_delegate "$oc" run --json "unfolded")"
@@ -504,6 +691,21 @@ mv "$td/task.json.new" "$td/task.json"
 run_delegate "$oc" recover --json | jq -e 'map(select(.task_id == "'"$task"'"))[0].reconciliation == "finalized"' >/dev/null \
   || fail "opencode: recover did not fold in an orphaned result"
 jq -e '.outcome.worker == "done"' "$td/task.json" >/dev/null || fail "opencode: recover lost the worker outcome"
+
+# A command that cannot be executed is auditable and distinct from a command
+# that ran and failed its verification assertions.
+verify_error_task="$(run_delegate "$oc" run --json "verification infrastructure" | jq -r .task_id)"
+verify_error_dir="$(taskdir_of "$verify_error_task")"
+set +e
+run_delegate "$oc" verify "$verify_error_task" -- command-that-does-not-exist-workflow-skills >/dev/null 2>&1
+code=$?
+set -e
+[ "$code" -eq 2 ] || fail "opencode: verification execution error should exit 2, got $code"
+jq -e '.result == "error" and .exit_code == 127' "$verify_error_dir/verifications/ver_001.json" >/dev/null \
+  || fail "opencode: verification execution error was not recorded distinctly"
+jq -e '.outcome.verification == "error" and .failure_class == "verification_error"
+       and .recommended_action == "repair_infrastructure"' "$verify_error_dir/task.json" >/dev/null \
+  || fail "opencode: verification execution error was folded incorrectly"
 
 # --- preserved transport behaviour -------------------------------------------
 
@@ -694,7 +896,8 @@ out="$(run_delegate "$oc" start --json --model json/model "json task")"
 echo "$out" | jq -e '.state == "running"' >/dev/null || fail "opencode: start --json state wrong: $out"
 echo "$out" | jq -e '.model == "json/model"' >/dev/null || fail "opencode: start --json model wrong: $out"
 echo "$out" | jq -e '.agent == "workflow-worker"' >/dev/null || fail "opencode: start --json agent wrong: $out"
-echo "$out" | jq -e '.session_id == null' >/dev/null || fail "opencode: start --json session should be null: $out"
+echo "$out" | jq -e '.session_id == null or .session_id == "ses_oc1"' >/dev/null \
+  || fail "opencode: start --json exposed an invalid session: $out"
 echo "$out" | jq -e '.task_id | startswith("task_")' >/dev/null || fail "opencode: start --json task_id wrong: $out"
 echo "$out" | jq -e '.job_id == .task_id' >/dev/null || fail "opencode: job_id alias missing: $out"
 echo "$out" | jq -e '.cwd != null' >/dev/null || fail "opencode: start --json cwd missing: $out"

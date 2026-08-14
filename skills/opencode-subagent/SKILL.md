@@ -40,7 +40,7 @@ Never collapse these into one "did it work".
 |---|---|
 | `transport` | `not_started` · `running` · `finished` · `incomplete` · `failed` · `timeout` · `cancelled` |
 | `worker` | `pending` · `done` · `done_with_concerns` · `blocked` · `no_report` · `failed` |
-| `verification` | `not_run` · `passed` · `failed` |
+| `verification` | `not_run` · `passed` · `failed` · `error` |
 | `supervisor` | `pending` · `decision_required` · `retry` · `accepted` · `rejected` · `cancelled` · `taken_over` |
 
 `transport: finished, worker: done` means the worker finished and claims success. It is **not** success. Only `verification: passed` plus your own review makes it so.
@@ -138,7 +138,7 @@ delegate → inspect → wait → interpret the worker outcome → verify indepe
    bash scripts/delegate.sh verify TASK -- pnpm test foo
    ```
 
-   Exit 0 = passed, 1 = failed; either way the command, cwd, timings, exit code and output are stored on the Task. Verification is refused while an attempt is running, because a result measured mid-edit means nothing. A worker claiming its tests pass is not verification.
+   Exit 0 = passed, 1 = the command ran and failed, 2 = the command could not be executed; every result stores the command, cwd, timings, exit code and output on the Task. Verification is refused while an attempt is running, because a result measured mid-edit means nothing. A worker claiming its tests pass is not verification.
 
 6. **Accept, correct, or take over.**
 
@@ -189,7 +189,7 @@ Decisions: `accept` · `retry` · `reject` · `cancel` · `take_over` · `contin
 
 Options: `--model provider/model`, `--cwd DIR`, `--resume SESSION_ID`, `--new-session`, `--reason TEXT`, `--label TEXT`, `--timeout SECS` (default 1800), `--poll-timeout SECS`, `--save-default`, `--json`.
 
-Exit codes: `0` finished · `1` verification failed · `2` usage/config error · `3` still running · `4` incomplete turn, resume the session · `124` timeout · `127` missing CLI · `130` cancelled.
+Exit codes: `0` finished · `1` verification failed · `2` usage/config or verification-execution error · `3` still running · `4` incomplete turn, resume the session · `124` timeout · `127` missing CLI · `130` cancelled.
 
 `verify TASK -- CMD ARGS...` execs the argv; `verify TASK "cmd | cmd"` runs a shell line when you need pipes or `&&`.
 
@@ -239,7 +239,7 @@ bash scripts/delegate.sh show TASK               # the whole story, in order
 bash scripts/delegate.sh logs TASK attempt_002 --stream request   # exactly what was asked
 ```
 
-`recover` is safe to run at any time. It finds attempts whose process died without writing a result, records them as `interrupted`, folds in results that were written but never applied, and leaves everything else alone. It never invents an outcome and never rewrites history.
+`recover` is safe to run at any time. It finds attempts whose runner and provider processes died without writing a result, records them as `interrupted`, folds in results that were written but never applied, and leaves everything else alone. A live provider remains `running` even if its detached runner disappeared. It never invents an outcome and never rewrites history.
 
 A detached attempt that finishes *after* you moved on cannot change the Task: it is recorded as `attempt_stale` and its own result is flagged `authoritative: false`.
 
@@ -257,10 +257,15 @@ verifications/     ver_NNN.json + captured stdout/stderr
 attempts/attempt_NNN/
   request.md       the exact text sent to the worker
   meta.json result.json worker-report.txt changed-files.txt
+  pid process.json provider.pid provider-process.json
   raw.jsonl stderr.log provider-progress.json
 ```
 
-Jobs are detached and survive your session. Retention is configurable in `subagents.conf`: orchestration history is kept for `OPENCODE_SUBAGENT_RETENTION_DAYS` (default 90), while the bulky provider streams (`raw.jsonl`, `provider-progress.json`, git snapshots) are dropped after `OPENCODE_SUBAGENT_RAW_RETENTION_DAYS` (default 7). Pruning runs on launch.
+On Linux, each persisted process identity includes the kernel boot ID and `/proc` start time as well as the PID, so a reboot or reused numeric PID is not mistaken for the old process. Other platforms fall back to `kill -0` liveness.
+
+`task.json` is authoritative for current state. `events.jsonl` is the append-only audit history, not a state-replay log. While holding the per-Task lock, a command atomically replaces `task.json` first and then appends the corresponding event. A crash in that narrow gap can leave current state newer than the history; `recover` reconciles attempt completion idempotently without duplicating terminal events. Event sequence numbers are unique and gap-free for the events that were durably appended.
+
+Jobs are detached and survive your session. Retention is configurable in `subagents.conf`: terminal Task history is kept for `OPENCODE_SUBAGENT_RETENTION_DAYS` (default 90), while its bulky provider streams (`raw.jsonl`, `provider-progress.json`, git snapshots) are dropped after `OPENCODE_SUBAGENT_RAW_RETENTION_DAYS` (default 7). Active and unresolved Tasks are never pruned. Pruning runs on launch and does not inspect or remove sibling Claude/Codex state.
 
 ## The worker agent
 
