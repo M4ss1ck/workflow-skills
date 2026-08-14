@@ -13,5 +13,7 @@ jobs:
         run: bash scripts/test-install.sh
       - name: Test skill linter
         run: bash scripts/test-lint-skills.sh
+      - name: Test subagent orchestration
+        run: bash scripts/test-subagent-scripts.sh
       - name: Lint skills
         run: bash scripts/lint-skills.sh

@@ -1,35 +1,56 @@
 #!/usr/bin/env bash
-# Delegate a bounded task to the constrained OpenCode worker agent as a detached job.
+# Supervise bounded OpenCode delegations: one Task, one or more Attempts, an
+# append-only event history, independent verification, and durable decisions.
 #
-# Operations:
-#   delegate.sh start  [opts] "<task>"          launch detached; returns immediately
-#   delegate.sh run    [opts] "<task>"          launch and block until the job ends
-#   delegate.sh resume SESSION_ID "<fix>"       continue an existing worker session
-#   delegate.sh status JOB_ID                   report state without blocking
-#   delegate.sh wait   JOB_ID [--poll-timeout SECS]
-#   delegate.sh cancel JOB_ID                   kill a running job
-#   delegate.sh policy [off|explicit|auto]      read or set the delegation policy
+# Delegating:
+#   delegate.sh start  [opts] "<task>"          launch Attempt 1 detached
+#   delegate.sh run    [opts] "<task>"          launch and block until it ends
+#   delegate.sh retry  TASK --reason R "<fix>"  new Attempt, same session by default
+#   delegate.sh resume SESSION_ID "<fix>"       new Attempt on whatever Task owns SESSION_ID
+#   delegate.sh cancel TASK [--keep-task]       stop the running Attempt
+#
+# Supervising:
+#   delegate.sh status TASK                     current state, no blocking
+#   delegate.sh wait   TASK [--poll-timeout S]
+#   delegate.sh verify TASK [--label L] -- CMD  run + record independent verification
+#   delegate.sh decide TASK DECISION --reason R accept|retry|reject|cancel|take_over|continue_waiting
+#
+# Inspecting:
+#   delegate.sh list [--active] [--limit N]     recent Tasks
+#   delegate.sh show TASK                       Task + attempts + verifications + events
+#   delegate.sh attempts TASK
+#   delegate.sh events TASK
+#   delegate.sh logs TASK [ATTEMPT] [--stream report|request|raw|stderr|progress|result|meta|changed]
+#   delegate.sh recover                         reconcile durable state after a crash
+#   delegate.sh policy [off|explicit|auto]
 #
 # Options:
 #   --model provider/model   worker model (overrides the configured one)
 #   --cwd DIR                working tree for the worker
 #   --resume SESSION_ID      continue a session (start/run)
+#   --new-session            retry without reusing the Task's OpenCode session
+#   --reason TEXT            why the supervisor is doing this (required: retry/reject/take_over)
+#   --label TEXT             name a verification run
 #   --timeout SECS           hard kill after SECS (default 1800)
 #   --poll-timeout SECS      how long `wait` blocks before reporting RUNNING
 #   --save-default           persist --model as the configured worker model
 #   --json                   machine-readable output
 #
-# Exit codes: 0 finished  2 usage/config  3 still running  4 incomplete turn (resume it)
-#             124 timeout  127 missing CLI  130 cancelled
+# Exit codes: 0 finished  1 verification failed  2 usage/config  3 still running
+#             4 incomplete turn (resume it)  124 timeout  127 missing CLI  130 cancelled
 #
-# Legacy forms still accepted: `delegate.sh [opts] "<task>"` and `delegate.sh --wait JOB_ID`.
+# Legacy forms still accepted: `delegate.sh [opts] "<task>"` and `delegate.sh --wait TASK`.
 set -euo pipefail
 
 provider="opencode"
 agent_name="workflow-worker"
 model_key="OPENCODE_SUBAGENT_MODEL"
 policy_key="OPENCODE_SUBAGENT_DELEGATION_POLICY"
+retention_key="OPENCODE_SUBAGENT_RETENTION_DAYS"
+raw_retention_key="OPENCODE_SUBAGENT_RAW_RETENTION_DAYS"
 default_policy="explicit"
+default_retention_days=90
+default_raw_retention_days=7
 state_root="${XDG_STATE_HOME:-$HOME/.local/state}/workflow-skills/subagents"
 conf_file="${XDG_CONFIG_HOME:-$HOME/.config}/workflow-skills/subagents.conf"
 skill_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -47,18 +68,31 @@ save_default=0
 wait_job=""
 poll_timeout=300
 poll_interval="${DELEGATE_POLL_INTERVAL:-5}"
-runner_jobdir=""
+stall_threshold="${DELEGATE_STALL_THRESHOLD:-300}"
+runner_attemptdir=""
 json_out=0
-job=""
-jobdir=""
+reason=""
+label=""
+stream="report"
+new_session=0
+only_active=0
+limit=20
+keep_task=0
+skip_decision=0
+task_id=""
+task_dir=""
 positionals=()
 
-usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# shellcheck source=skills/opencode-subagent/scripts/orchestration.sh
+. "$skill_dir/scripts/orchestration.sh"
+
+usage() { sed -n '2,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() { echo "ERROR: $1" >&2; exit "${2:-2}"; }
 
 op=""
 case "${1:-}" in
-  start|run|resume|status|wait|cancel|policy) op="$1"; shift ;;
+  start|run|retry|resume|status|wait|cancel|verify|decide|list|show|attempts|events|logs|recover|policy)
+    op="$1"; shift ;;
 esac
 
 while [ "$#" -gt 0 ]; do
@@ -66,12 +100,20 @@ while [ "$#" -gt 0 ]; do
     --model)        shift; model="${1:?--model requires a value}" ;;
     --cwd)          shift; cwd="${1:?--cwd requires a path}" ;;
     --resume)       shift; resume="${1:?--resume requires a session id}" ;;
+    --new-session)  new_session=1 ;;
+    --reason)       shift; reason="${1:?--reason requires text}" ;;
+    --label)        shift; label="${1:?--label requires text}" ;;
+    --stream)       shift; stream="${1:?--stream requires a name}" ;;
     --timeout)      shift; hard_timeout="${1:?--timeout requires seconds}" ;;
     --save-default) save_default=1 ;;
-    --wait)         shift; wait_job="${1:?--wait requires a job id}" ;;
+    --wait)         shift; wait_job="${1:?--wait requires a task id}" ;;
     --poll-timeout) shift; poll_timeout="${1:?--poll-timeout requires seconds}" ;;
+    --limit)        shift; limit="${1:?--limit requires a number}" ;;
+    --active)       only_active=1 ;;
+    --all)          only_active=0 ;;
+    --keep-task)    keep_task=1 ;;
     --json)         json_out=1 ;;
-    --__run)        shift; runner_jobdir="${1:?internal flag requires a job dir}" ;;
+    --__run)        shift; runner_attemptdir="${1:?internal flag requires an attempt dir}" ;;
     -h|--help)      usage; exit 0 ;;
     --)             shift; while [ "$#" -gt 0 ]; do positionals+=("$1"); shift; done; break ;;
     --*)            die "unknown option: $1" ;;
@@ -94,6 +136,15 @@ conf_set() {
     echo "$1=$2"
   } >"$conf_file.tmp"
   mv "$conf_file.tmp" "$conf_file"
+}
+
+conf_number() {
+  local value
+  value="$(conf_get "$1")"
+  case "$value" in
+    ''|*[!0-9]*) echo "$2" ;;
+    *) echo "$value" ;;
+  esac
 }
 
 resolve_policy() {
@@ -124,64 +175,36 @@ ensure_agent() {
   fi
 }
 
+# Retention favours the audit trail over the transient bulk. Orchestration
+# history (task.json, events, requests, reports, verifications, decisions) is
+# kept for RETENTION_DAYS; the large provider streams are dropped much sooner.
+prune_state() {
+  local keep_days raw_days d state
+  keep_days="$(conf_number "$retention_key" "$default_retention_days")"
+  raw_days="$(conf_number "$raw_retention_key" "$default_raw_retention_days")"
+  for d in "$state_root"/task_*/; do
+    [ -f "${d}task.json" ] || continue
+    state="$(json_read "${d}task.json" '.state')"
+    case "$state" in accepted|rejected|cancelled|taken_over) ;; *) continue ;; esac
+    find "${d}attempts" -mindepth 2 -maxdepth 2 -type f \
+      \( -name 'raw.jsonl' -o -name 'provider-progress.json' -o -name 'git-before.txt' -o -name 'git-after.txt' \) \
+      -mtime "+$raw_days" -delete 2>/dev/null || true
+    if find "${d}task.json" -mtime "+$keep_days" -print -quit 2>/dev/null | grep -q .; then
+      rm -rf "${d%/}"
+    fi
+  done
+}
+
 # ------------------------------------------------------------------- job output
 
 print_watch() {
   local dir="$1"
-  echo "WATCH:  tail -f $dir/raw.jsonl | jq -r '$watch_filter'"
-  echo "STATUS: cat $dir/status"
+  echo "WATCH: tail -f $dir/raw.jsonl | jq -r '$watch_filter'"
+  echo "STATUS: bash $skill_dir/scripts/delegate.sh status $(basename "$(dirname "$(dirname "$dir")")")"
   echo "PROGRESS: cat $dir/provider-progress.json"
-  echo "PROVIDER_REPORT: cat $dir/provider-report.txt"
-  echo "RESULT: cat $dir/result.txt"
-}
-
-job_field() { cat "$1/$2" 2>/dev/null || true; }
-
-job_elapsed() {
-  local started
-  started="$(job_field "$1" started)"
-  echo $(( $(date +%s) - ${started:-0} ))
-}
-
-json_state_for() {
-  case "$1" in
-    done) echo completed ;;
-    *)    echo "$1" ;;
-  esac
-}
-
-json_job() {
-  local dir="$1" id="$2" state="$3" code="$4"
-  local report_file="$dir/provider-report.txt" changed_file="$dir/changed-files.txt"
-  [ -f "$report_file" ] || report_file=/dev/null
-  [ -f "$changed_file" ] || changed_file=/dev/null
-  jq -n \
-    --arg job_id "$id" \
-    --arg state "$(json_state_for "$state")" \
-    --arg session "$(job_field "$dir" session)" \
-    --arg model "$(job_field "$dir" model)" \
-    --arg agent "$agent_name" \
-    --arg cwd "$(job_field "$dir" cwd)" \
-    --arg cost "$(job_field "$dir" cost)" \
-    --arg code "$code" \
-    --argjson elapsed "$(job_elapsed "$dir")" \
-    --arg state_dir "$dir" \
-    --rawfile report "$report_file" \
-    --rawfile changed "$changed_file" \
-    '{
-      job_id: $job_id,
-      state: $state,
-      session_id: (if $session == "" then null else $session end),
-      model: (if $model == "" then null else $model end),
-      agent: $agent,
-      cwd: (if $cwd == "" then null else $cwd end),
-      exit_code: (if $code == "" then null else ($code | tonumber) end),
-      cost_usd: (($cost | tonumber?) // null),
-      elapsed_seconds: $elapsed,
-      state_dir: $state_dir,
-      report: (if $state == "running" then null else $report end),
-      changed_files: ($changed | split("\n") | map(select(length > 0)))
-    }'
+  echo "REPORT: cat $dir/worker-report.txt"
+  echo "PROVIDER_REPORT: cat $dir/worker-report.txt"
+  echo "RESULT: cat $dir/result.json"
 }
 
 # ------------------------------------------------------- provider (OpenCode) IO
@@ -263,6 +286,21 @@ stream_session() {
   jq -rs '[.[] | .sessionID? // empty] | first // empty' "$raw_jsonl" 2>/dev/null || true
 }
 
+# A CLI-stream report is trusted only when the same invocation emitted a
+# step_finish after it. This is the provider-final fallback when database
+# inspection is unavailable or drifts.
+stream_final_report() {
+  jq -rs '
+    ([to_entries[] | select(.value.type? == "step_finish") | .key] | last) as $finish
+    | if $finish == null then empty
+      else ([to_entries[] | select(.key < $finish and .value.type? == "text") | .value.part.text? // empty] | last // empty)
+      end' "$1" 2>/dev/null || true
+}
+
+stream_finished() {
+  jq -e -s 'any(.[]; .type? == "step_finish")' "$1" >/dev/null 2>&1
+}
+
 # ------------------------------------------------------------------ changed files
 # Best-effort: the worktree diff between launch and finish. A file that was
 # already dirty in the same way before the run is invisible here, so this is a
@@ -298,18 +336,58 @@ run_with_timeout() {
 }
 
 do_run() {
-  local dir="$runner_jobdir"
-  local work="${cwd:-$PWD}"
+  local dir="$runner_attemptdir"
+  local tdir attempt work
+  tdir="$(cd "$dir/../.." && pwd)"
+  attempt="$(basename "$dir")"
+  work="${cwd:-$PWD}"
   local session cost report final_id db_report db_cost assistant_id assistant_finish
   local baseline_final_id="" baseline_assistant_id=""
   local baseline_final_ready=0 baseline_assistant_ready=0
-  local runner_pid provider_complete=0 exit_code db_available=0
+  local runner_pid="" provider_complete=0 exit_code db_available=0 announced_session=0
+  local transport worker class action
+  printf '%s\n' "${BASHPID:-$$}" >"$dir/pid"
+  persist_process_identity "$dir/process.json" "${BASHPID:-$$}"
+
+  stop_provider() {
+    local i
+    if [ -n "$runner_pid" ]; then
+      kill -TERM -- "-$runner_pid" 2>/dev/null || kill -TERM "$runner_pid" 2>/dev/null || true
+      for i in {1..10}; do
+        kill -0 "$runner_pid" 2>/dev/null || break
+        sleep 0.1
+      done
+      kill -KILL -- "-$runner_pid" 2>/dev/null || kill -KILL "$runner_pid" 2>/dev/null || true
+      wait "$runner_pid" 2>/dev/null || true
+    fi
+    exit 130
+  }
+  trap stop_provider TERM INT
+
   build_cmd
   if provider_db_available; then db_available=1; fi
   if [ "$db_available" -eq 1 ] && [ -n "$resume" ]; then
     if baseline_final_id="$(provider_final_id "$resume")"; then baseline_final_ready=1; fi
     if baseline_assistant_id="$(provider_latest_assistant_id "$resume")"; then baseline_assistant_ready=1; fi
   fi
+
+  # Publish the session as soon as it exists: a supervisor that cancels or
+  # crashes mid-attempt still needs an id to resume from.
+  announce_session() {
+    [ "$announced_session" -eq 0 ] || return 0
+    announced_session=1
+    lock_acquire "$tdir"
+    if [ "$(json_read "$tdir/task.json" '.current_attempt')" != "$attempt" ] \
+      || task_is_terminal "$tdir" || [ -f "$dir/result.json" ]; then
+      lock_release
+      return 0
+    fi
+    task_update "$tdir" '.session_id = $session' --arg session "$1"
+    event_append "$tdir" session_discovered \
+      "$(jq -c -n --arg attempt "$attempt" --arg session "$1" --argjson reused "$([ -n "$resume" ] && echo true || echo false)" \
+        '{attempt: $attempt, session_id: $session, reused: $reused}')"
+    lock_release
+  }
 
   set +e
   if [ "$db_available" -eq 1 ] && command -v setsid >/dev/null 2>&1; then
@@ -319,13 +397,15 @@ do_run() {
       setsid "${cmd[@]}" "$spec" >"$dir/raw.jsonl" 2>"$dir/stderr.log" &
     fi
     runner_pid=$!
+    printf '%s\n' "$runner_pid" >"$dir/provider.pid"
+    persist_process_identity "$dir/provider-process.json" "$runner_pid"
     session="$resume"
-    if [ -n "$session" ]; then printf '%s\n' "$session" >"$dir/session"; fi
+    if [ -n "$session" ]; then announce_session "$session"; fi
 
     while kill -0 "$runner_pid" 2>/dev/null; do
       if [ -z "$session" ]; then
         session="$(stream_session "$dir/raw.jsonl")"
-        if [ -n "$session" ]; then printf '%s\n' "$session" >"$dir/session"; fi
+        if [ -n "$session" ]; then announce_session "$session"; fi
       fi
       if [ -n "$session" ]; then
         snapshot_provider_progress "$dir" "$session"
@@ -333,7 +413,7 @@ do_run() {
           && [ -n "$final_id" ] \
           && { [ -z "$resume" ] || { [ "$baseline_final_ready" -eq 1 ] && [ "$final_id" != "$baseline_final_id" ]; }; } \
           && db_report="$(provider_report "$session" "$final_id")"; then
-          printf '%s\n' "$db_report" >"$dir/provider-report.txt"
+          printf '%s\n' "$db_report" >"$dir/worker-report.txt"
           provider_complete=1
           kill -TERM -- "-$runner_pid" 2>/dev/null || true
           wait "$runner_pid" 2>/dev/null
@@ -350,14 +430,20 @@ do_run() {
       exit_code=$?
     fi
   else
-    run_with_timeout "${cmd[@]}" "$spec" >"$dir/raw.jsonl" 2>"$dir/stderr.log"
+    run_with_timeout "${cmd[@]}" "$spec" >"$dir/raw.jsonl" 2>"$dir/stderr.log" &
+    runner_pid=$!
+    printf '%s\n' "$runner_pid" >"$dir/provider.pid"
+    persist_process_identity "$dir/provider-process.json" "$runner_pid"
+    wait "$runner_pid"
     exit_code=$?
   fi
   set -e
+  runner_pid=""
 
   session="${resume:-$(stream_session "$dir/raw.jsonl")}"
+  [ -z "$session" ] || announce_session "$session"
   cost="$(jq -rs '[.[] | select(.type? == "step_finish") | .part.cost? // empty] | last // empty' "$dir/raw.jsonl" 2>/dev/null || true)"
-  report="$(jq -rs '[.[] | select(.type? == "text") | .part.text? // empty] | last // empty' "$dir/raw.jsonl" 2>/dev/null || true)"
+  report="$(stream_final_report "$dir/raw.jsonl")"
 
   if [ "$db_available" -eq 1 ] && [ -n "$session" ]; then
     snapshot_provider_progress "$dir" "$session"
@@ -378,104 +464,166 @@ do_run() {
     fi
   fi
 
+  if [ "$exit_code" -eq 0 ] && [ "$provider_complete" -eq 0 ] && ! stream_finished "$dir/raw.jsonl"; then
+    exit_code=4
+    report="${report}"$'\n\n'"ERROR: OpenCode exited before producing a provider-final response. Resume this session."
+  fi
+
   if [ -z "$report" ]; then
     report="$(tail -c 2000 "$dir/stderr.log"; tail -c 2000 "$dir/raw.jsonl")"
   fi
-  printf '%s\n' "$report" >"$dir/provider-report.txt"
-  printf '%s\n' "${session:-}" >"$dir/session"
-  printf '%s\n' "${cost:-}" >"$dir/cost"
+  printf '%s\n' "$report" >"$dir/worker-report.txt"
   record_changed_files "$dir" "$work"
 
-  {
-    echo "SESSION: ${session:-unknown}"
-    echo "COST: ${cost:-unknown}"
-    echo "EXIT: $exit_code"
-    echo "--- REPORT ---"
-    echo "$report"
-  } >"$dir/result.txt"
+  case "$exit_code" in
+    0)   transport="finished" ;;
+    4)   transport="incomplete" ;;
+    124) transport="timeout" ;;
+    130) transport="cancelled" ;;
+    *)   transport="failed" ;;
+  esac
+  worker="$(parse_worker_report "$dir/worker-report.txt" | jq -r '.worker')"
+  IFS='|' read -r class action <<<"$(classify_attempt "$exit_code" "$worker" "$session" "$dir/stderr.log")"
 
-  local state="done"
-  if [ "$exit_code" -eq 124 ]; then
-    state="timeout"
-  elif [ "$exit_code" -eq 4 ]; then
-    state="incomplete"
-  elif [ "$exit_code" -ne 0 ]; then
-    state="failed"
+  lock_acquire "$tdir"
+  if [ ! -f "$dir/result.json" ]; then
+    attempt_write_result "$dir" "${session:-}" "${cost:-}" "" "$exit_code" "$transport" "$class" "$action"
+    attempt_finalize "$tdir" "$attempt" >/dev/null
   fi
-  echo "$state $exit_code" >"$dir/status"
+  lock_release
+  trap - TERM INT
+}
+
+# ------------------------------------------------------------------ resolution
+
+require_task() {
+  local id="${1:-}"
+  [ -n "$id" ] || die "missing task id (see: delegate.sh list)"
+  if task_exists "$id"; then
+    task_id="$id"
+    task_dir="$state_root/$id"
+    return 0
+  fi
+  if legacy_job_exists "$id"; then
+    task_id="$id"
+    task_dir="$state_root/$id"
+    return 1
+  fi
+  die "unknown task: $id (looked in $state_root; see: delegate.sh list)"
+}
+
+# The pre-Task layout had no task.json. Read those directories, clearly labelled,
+# rather than deleting them or pretending they are Tasks.
+legacy_emit() {
+  local dir="$state_root/$task_id" st code
+  st="$(cat "$dir/status" 2>/dev/null || echo "running")"
+  code="${st##* }"
+  case "$code" in ''|*[!0-9]*) code=3 ;; esac
+  if [ "$json_out" -eq 1 ]; then
+    jq -n --arg id "$task_id" --arg state "${st%% *}" --arg dir "$dir" --argjson code "$code" \
+      --rawfile report "$([ -f "$dir/result.txt" ] && echo "$dir/result.txt" || echo /dev/null)" \
+      '{task_id: $id, job_id: $id, legacy: true, state: $state, exit_code: $code,
+        state_dir: $dir, report: $report,
+        note: "pre-Task job directory; no attempt/event history exists for it"}'
+  else
+    echo "LEGACY JOB: $task_id (pre-Task layout; no attempt or event history)"
+    cat "$dir/result.txt" 2>/dev/null || echo "STATE: ${st%% *}"
+  fi
+  exit "$code"
+}
+
+task_exit_code() {
+  local dir="$1" state current
+  state="$(task_state "$dir")"
+  [ "$state" != "cancelled" ] || { echo 130; return 0; }
+  current="$(json_read "$dir/task.json" '.current_attempt')"
+  if [ -z "$current" ] || [ "$current" = "null" ]; then echo 0; return 0; fi
+  if [ ! -f "$dir/attempts/$current/result.json" ]; then echo 3; return 0; fi
+  json_read "$dir/attempts/$current/result.json" '.exit_code // 0'
+}
+
+attempt_running() {
+  local dir="$1" current
+  current="$(json_read "$dir/task.json" '.current_attempt')"
+  [ -n "$current" ] && [ "$current" != "null" ] || return 1
+  [ ! -f "$dir/attempts/$current/result.json" ] || return 1
+  return 0
 }
 
 # ------------------------------------------------------------------ operations
 
-require_job() {
-  [ -n "$wait_job" ] || die "missing job id"
-  jobdir="$state_root/$wait_job"
-  [ -d "$jobdir" ] || die "unknown job: $wait_job (looked in $state_root)"
-}
-
-emit_terminal() {
-  local st="$1"
-  if [ "$json_out" -eq 1 ]; then
-    json_job "$jobdir" "$wait_job" "${st%% *}" "${st##* }"
-  else
-    cat "$jobdir/result.txt"
+emit_status() {
+  local code
+  lock_acquire "$task_dir"
+  if [ "$json_out" -eq 1 ]; then json_status "$task_dir"; else
+    local adir
+    if attempt_running "$task_dir"; then
+      adir="$task_dir/attempts/$(json_read "$task_dir/task.json" '.current_attempt')"
+      attempt_liveness "$adir" | jq -r '"RUNNING (elapsed \(.elapsed_seconds)s, idle \(.idle_seconds // "?")s, alive=\(.process_alive), possibly_stalled=\(.possibly_stalled))"'
+      render_status "$task_dir"
+      print_watch "$adir"
+    else
+      render_status "$task_dir"
+    fi
   fi
-  exit "${st##* }"
-}
-
-emit_running() {
-  if [ "$json_out" -eq 1 ]; then
-    json_job "$jobdir" "$wait_job" running ""
-  else
-    echo "RUNNING (elapsed $(job_elapsed "$jobdir")s)"
-    print_watch "$jobdir"
-  fi
-  exit 3
+  code="$(task_exit_code "$task_dir")"
+  lock_release
+  exit "$code"
 }
 
 do_status() {
-  require_job
-  local st
-  st="$(job_field "$jobdir" status)"
-  st="${st:-running}"
-  if [ "${st%% *}" != "running" ]; then emit_terminal "$st"; fi
-  emit_running
+  require_task "${positionals[0]:-$wait_job}" || legacy_emit
+  emit_status
 }
 
 do_wait() {
-  require_job
+  require_task "${positionals[0]:-$wait_job}" || legacy_emit
   local end=$((SECONDS + poll_timeout))
-  local st
-  while :; do
-    st="$(job_field "$jobdir" status)"
-    st="${st:-running}"
-    if [ "${st%% *}" != "running" ]; then emit_terminal "$st"; fi
+  while attempt_running "$task_dir"; do
     if [ "$SECONDS" -ge "$end" ]; then break; fi
     sleep "$poll_interval"
   done
-  emit_running
+  emit_status
 }
 
 do_cancel() {
-  require_job
-  local st pid
-  st="$(job_field "$jobdir" status)"
-  st="${st:-running}"
-  if [ "${st%% *}" != "running" ]; then emit_terminal "$st"; fi
-  pid="$(job_field "$jobdir" pid)"
-  if [ -n "$pid" ]; then
-    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  require_task "${positionals[0]:-$wait_job}" || legacy_emit
+  local current adir pid i
+  lock_acquire "$task_dir"
+  if task_is_terminal "$task_dir"; then lock_release; emit_status; fi
+  current="$(json_read "$task_dir/task.json" '.current_attempt')"
+  if attempt_running "$task_dir"; then
+    adir="$task_dir/attempts/$current"
+    pid="$(attempt_pid "$adir")"
+    if [ -n "$pid" ] && attempt_alive "$adir"; then
+      attempt_signal "$adir" TERM
+      for i in {1..30}; do
+        attempt_alive "$adir" || break
+        sleep 0.1
+      done
+      if attempt_alive "$adir"; then
+        attempt_signal "$adir" KILL
+      fi
+    fi
+    record_changed_files "$adir" "$(json_read "$task_dir/task.json" '.cwd')"
+    printf '%s\n' "Cancelled by the supervisor before the worker reported." >"$adir/worker-report.txt"
+    attempt_write_result "$adir" "$(json_read "$task_dir/task.json" '.session_id // ""')" "" "" 130 cancelled cancelled none
+    attempt_finalize "$task_dir" "$current" >/dev/null
+  elif [ -n "$current" ] && [ "$current" != "null" ] \
+    && [ "$(task_state "$task_dir")" = "running" ]; then
+    # Completion won the result-file race but had not yet folded its result.
+    attempt_finalize "$task_dir" "$current" >/dev/null
   fi
-  sleep 1
-  echo "cancelled 130" >"$jobdir/status"
-  {
-    echo "SESSION: $(job_field "$jobdir" session)"
-    echo "COST: $(job_field "$jobdir" cost)"
-    echo "EXIT: 130"
-    echo "--- REPORT ---"
-    echo "Cancelled by the supervisor before the worker reported."
-  } >"$jobdir/result.txt"
-  emit_terminal "cancelled 130"
+  if [ "$keep_task" -eq 0 ]; then
+    task_update "$task_dir" \
+      '.state = "cancelled" | .outcome.supervisor = "cancelled" | .recommended_action = "none"
+       | .disposition = {decision: "cancel", reason: $reason, at: $_now}' \
+      --arg reason "${reason:-cancelled by the supervisor}"
+    event_append "$task_dir" task_cancelled \
+      "$(jq -c -n --arg reason "${reason:-cancelled by the supervisor}" '{reason: $reason}')"
+  fi
+  lock_release
+  emit_status
 }
 
 do_policy() {
@@ -491,16 +639,23 @@ do_policy() {
   worker="$(conf_get "$model_key")"
   if [ "$json_out" -eq 1 ]; then
     jq -n --arg policy "$current" --arg model "$worker" --arg conf "$conf_file" --arg agent "$agent_name" \
-      '{delegation_policy: $policy, worker_model: (if $model == "" then null else $model end), agent: $agent, conf_file: $conf}'
+      --argjson retention "$(conf_number "$retention_key" "$default_retention_days")" \
+      --argjson raw_retention "$(conf_number "$raw_retention_key" "$default_raw_retention_days")" \
+      '{delegation_policy: $policy, worker_model: (if $model == "" then null else $model end),
+        agent: $agent, conf_file: $conf,
+        retention_days: $retention, raw_retention_days: $raw_retention}'
   else
     echo "DELEGATION_POLICY: $current"
     echo "WORKER_MODEL: ${worker:-none}"
     echo "CONF: $conf_file"
+    echo "RETENTION_DAYS: $(conf_number "$retention_key" "$default_retention_days")"
+    echo "RAW_RETENTION_DAYS: $(conf_number "$raw_retention_key" "$default_raw_retention_days")"
   fi
 }
 
-do_launch() {
-  [ -n "$spec" ] || die "missing task spec"
+# ---------------------------------------------------------------------- launch
+
+preflight() {
   command -v opencode >/dev/null 2>&1 \
     || die "opencode not found on PATH — run scripts/install.sh --doctor" 127
   command -v jq >/dev/null 2>&1 \
@@ -509,70 +664,463 @@ do_launch() {
     [ -n "$model" ] || die "--save-default requires --model"
     conf_set "$model_key" "$model"
   fi
-
   local policy
   policy="$(resolve_policy)"
   [ "$policy" != "off" ] \
     || die "delegation is disabled ($policy_key=off in $conf_file); enable it with: delegate.sh policy explicit"
-
   resolve_model
   ensure_agent
-
   mkdir -p "$state_root"
-  find "$state_root" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+  prune_state
+}
 
-  job="$provider-$(date +%Y%m%d-%H%M%S)"
-  jobdir="$state_root/$job"
-  while ! mkdir "$jobdir" 2>/dev/null; do
-    job="$provider-$(date +%Y%m%d-%H%M%S)-$RANDOM"
-    jobdir="$state_root/$job"
-  done
+task_title() {
+  printf '%s' "$1" | sed -n '/[^[:space:]]/{s/^[[:space:]]*//;s/[[:space:]]*$//;p;q;}' | cut -c1-100
+}
 
-  date +%s >"$jobdir/started"
-  echo running >"$jobdir/status"
-  printf '%s\n' "$model" >"$jobdir/model"
-  printf '%s\n' "${cwd:-$PWD}" >"$jobdir/cwd"
-  printf '%s\n' "$resume" >"$jobdir/session"
-  : >"$jobdir/raw.jsonl"
-  : >"$jobdir/cost"
-  : >"$jobdir/changed-files.txt"
-  echo '[]' >"$jobdir/provider-progress.json"
-  : >"$jobdir/provider-report.txt"
-  git_porcelain "${cwd:-$PWD}" >"$jobdir/git-before.txt"
-
-  local args=(--__run "$jobdir" --timeout "$hard_timeout" --model "$model")
+# spawn_attempt ATTEMPT_DIR — detach the runner and record its pid.
+spawn_attempt() {
+  local adir="$1" pid
+  local args=(--__run "$adir" --timeout "$hard_timeout" --model "$model")
   if [ -n "$cwd" ]; then args+=(--cwd "$cwd"); fi
   if [ -n "$resume" ]; then args+=(--resume "$resume"); fi
-
+  git_porcelain "${cwd:-$PWD}" >"$adir/git-before.txt"
   if command -v setsid >/dev/null 2>&1; then
-    setsid bash "${BASH_SOURCE[0]}" "${args[@]}" "$spec" >/dev/null 2>"$jobdir/launcher.err" </dev/null &
+    setsid bash "${BASH_SOURCE[0]}" "${args[@]}" "$spec" >/dev/null 2>"$adir/launcher.err" </dev/null &
   else
-    nohup bash "${BASH_SOURCE[0]}" "${args[@]}" "$spec" >/dev/null 2>"$jobdir/launcher.err" </dev/null &
+    nohup bash "${BASH_SOURCE[0]}" "${args[@]}" "$spec" >/dev/null 2>"$adir/launcher.err" </dev/null &
   fi
-  echo $! >"$jobdir/pid"
+  pid=$!
+  printf '%s\n' "$pid" >"$adir/pid"
+  persist_process_identity "$adir/process.json" "$pid"
 }
 
-do_start() {
+do_launch() {
+  [ -n "$spec" ] || die "missing task spec"
+  preflight
+
+  task_id="task_$(date +%Y%m%d-%H%M%S)-$RANDOM"
+  task_dir="$state_root/$task_id"
+  while ! mkdir "$task_dir" 2>/dev/null; do
+    task_id="task_$(date +%Y%m%d-%H%M%S)-$RANDOM"
+    task_dir="$state_root/$task_id"
+  done
+
+  lock_acquire "$task_dir"
+  task_create "$task_dir" "$task_id" "${cwd:-$PWD}" "$model" "$hard_timeout" "$(task_title "$spec")"
+
+  local adir
+  adir="$(attempt_create "$task_dir" 1 initial "" "$resume" "$reason" "$spec")"
+  attempt_register "$task_dir" attempt_001
+  spawn_attempt "$adir"
+  lock_release
+}
+
+do_retry() {
+  require_task "${positionals[0]:-}" || die "cannot retry a pre-Task job directory; start a new task instead"
+  spec="${positionals[1]:-}"
+  [ -n "$spec" ] || die "retry requires a correction: delegate.sh retry TASK --reason R \"<correction>\""
+  [ -n "$reason" ] || die "retry requires --reason (it becomes the durable supervisor decision)"
+
+  preflight
+
+  local prev index session adir
+  lock_acquire "$task_dir"
+  ! task_is_terminal "$task_dir" \
+    || die "task $task_id is $(task_state "$task_dir"); it cannot be retried"
+  ! attempt_running "$task_dir" \
+    || die "attempt $(json_read "$task_dir/task.json" '.current_attempt') is still running; wait for it or: delegate.sh cancel $task_id --keep-task"
+  prev="$(json_read "$task_dir/task.json" '.current_attempt')"
+  index=$(( $(json_read "$task_dir/task.json" '.attempt_count') + 1 ))
+  cwd="${cwd:-$(json_read "$task_dir/task.json" '.cwd')}"
+  session="$(json_read "$task_dir/task.json" '.session_id // ""')"
+  [ "$session" != "null" ] || session=""
+  if [ "$new_session" -eq 1 ]; then session=""; fi
+  if [ -n "$resume" ]; then session="$resume"; fi
+  resume="$session"
+
+  if [ "$skip_decision" -eq 0 ]; then
+    record_decision "$task_dir" retry "$reason" "$prev"
+  fi
+
+  adir="$(attempt_create "$task_dir" "$index" retry "$prev" "$session" "$reason" "$spec")"
+  attempt_register "$task_dir" "$(attempt_id_for "$index")"
+  spawn_attempt "$adir"
+  lock_release
+}
+
+# The legacy entrypoint: resume by session id. Reattach to whatever Task owns
+# that session so the correction lands in the same audit trail.
+do_resume() {
+  local session="${positionals[0]:-}"
+  spec="${positionals[1]:-}"
+  [ -n "$session" ] || die "resume requires a session id: delegate.sh resume SESSION_ID \"<fix>\""
+  [ -n "$spec" ] || die "resume requires a correction: delegate.sh resume SESSION_ID \"<fix>\""
+
+  local d found="" candidate
+  for d in "$state_root"/task_*/; do
+    [ -f "${d}task.json" ] || continue
+    [ "$(json_read "${d}task.json" '.session_id')" = "$session" ] || continue
+    task_is_terminal "${d%/}" && continue
+    candidate="$(basename "${d%/}")"
+    [ -z "$found" ] || die "session $session belongs to multiple open Tasks ($found, $candidate); retry one by Task id"
+    found="$candidate"
+  done
+
+  if [ -n "$found" ]; then
+    positionals=("$found" "$spec")
+    # A `decide retry` immediately before this already carries the reasoning;
+    # don't record a second, emptier decision for the same correction.
+    if [ -z "$reason" ] \
+      && [ "$(json_read "$state_root/$found/task.json" '.disposition.decision // ""')" = "retry" ]; then
+      reason="$(json_read "$state_root/$found/task.json" '.disposition.reason // ""')"
+      skip_decision=1
+    fi
+    reason="${reason:-resumed by session id}"
+    do_retry
+    return
+  fi
+
+  resume="$session"
   do_launch
+}
+
+emit_launch() {
   if [ "$json_out" -eq 1 ]; then
-    json_job "$jobdir" "$job" running ""
+    json_status "$task_dir"
   else
-    echo "JOB: $job"
-    print_watch "$jobdir"
+    echo "TASK: $task_id"
+    echo "JOB: $task_id"
+    echo "ATTEMPT: $(json_read "$task_dir/task.json" '.current_attempt')"
+    print_watch "$task_dir/attempts/$(json_read "$task_dir/task.json" '.current_attempt')"
   fi
 }
+
+do_start() { do_launch; emit_launch; }
 
 do_blocking_run() {
   do_launch
-  [ "$json_out" -eq 1 ] || echo "JOB: $job"
-  wait_job="$job"
+  if [ "$json_out" -ne 1 ]; then
+    echo "TASK: $task_id"
+    echo "JOB: $task_id"
+  fi
   poll_timeout=$((hard_timeout + 60))
+  positionals=("$task_id")
+  wait_job="$task_id"
   do_wait
+}
+
+# ---------------------------------------------------------------- verification
+# Runs outside the worker's OpenCode turn, by the supervisor, and is recorded
+# whether it passes or fails. A worker claiming its tests pass is not this.
+
+# Re-executable and still legible in the audit record, unlike printf %q.
+shell_quote() {
+  local a out=""
+  for a in "$@"; do
+    case "$a" in
+      ''|*[!A-Za-z0-9_./=:@,+-]*) out+="'${a//\'/\'\\\'\'}' " ;;
+      *) out+="$a " ;;
+    esac
+  done
+  printf '%s' "${out% }"
+}
+
+do_verify() {
+  require_task "${positionals[0]:-}" || die "cannot verify a pre-Task job directory"
+  local cmdline
+  if [ "${#positionals[@]}" -gt 2 ]; then
+    cmdline="$(shell_quote "${positionals[@]:1}")"
+  else
+    cmdline="${positionals[1]:-}"
+  fi
+  [ -n "$cmdline" ] || die "verify requires a command: delegate.sh verify TASK -- pnpm test"
+  lock_acquire "$task_dir"
+  ! attempt_running "$task_dir" \
+    || die "attempt $(json_read "$task_dir/task.json" '.current_attempt') is still running; verification must run outside the worker's turn"
+
+  local work vid vdir started ended code result
+  work="${cwd:-$(json_read "$task_dir/task.json" '.cwd')}"
+  vdir="$task_dir/verifications"
+  mkdir -p "$vdir"
+  vid="$(verification_next_id "$task_dir")"
+  task_update "$task_dir" '.verification_count = (.verification_count + 1)'
+  event_append "$task_dir" verification_started \
+    "$(jq -c -n --arg id "$vid" --arg cmd "$cmdline" --arg cwd "$work" '{verification: $id, command: $cmd, cwd: $cwd}')"
+
+  started="$(now_iso)"
+  set +e
+  ( cd "$work" && bash -c "$cmdline" ) >"$vdir/$vid.stdout" 2>"$vdir/$vid.stderr"
+  code=$?
+  set -e
+  ended="$(now_iso)"
+  case "$code" in
+    0)       result="passed" ;;
+    126|127) result="error" ;;
+    *)       result="failed" ;;
+  esac
+
+  jq -n \
+    --arg id "$vid" \
+    --arg attempt "$(json_read "$task_dir/task.json" '.current_attempt')" \
+    --arg command "$cmdline" \
+    --arg cwd "$work" \
+    --arg label "$label" \
+    --arg started "$started" \
+    --arg ended "$ended" \
+    --argjson code "$code" \
+    --arg result "$result" \
+    --arg stdout_file "$vdir/$vid.stdout" \
+    --arg stderr_file "$vdir/$vid.stderr" \
+    --arg stdout_tail "$(tail -c 4000 "$vdir/$vid.stdout" 2>/dev/null || true)" \
+    --arg stderr_tail "$(tail -c 4000 "$vdir/$vid.stderr" 2>/dev/null || true)" \
+    '{verification_id: $id, attempt: $attempt, label: (if $label == "" then null else $label end),
+      command: $command, cwd: $cwd, started_at: $started, ended_at: $ended,
+      exit_code: $code, result: $result,
+      stdout_file: $stdout_file, stderr_file: $stderr_file,
+      stdout_tail: $stdout_tail, stderr_tail: $stderr_tail}' \
+    | write_atomic "$vdir/$vid.json"
+
+  task_update "$task_dir" \
+    '.outcome.verification = $result
+     | .last_verification = {id: $id, command: $command, result: $result, exit_code: $code, at: $_now}
+     | .recommended_action = (if $result == "passed" then "inspect_diff"
+                              elif $result == "error" then "repair_infrastructure"
+                              else "resume_same_session" end)
+     | .failure_class = (if $result == "passed" then .failure_class
+                         elif $result == "error" then "verification_error"
+                         else "verification_failed" end)' \
+    --arg result "$result" --arg id "$vid" --arg command "$cmdline" --argjson code "$code"
+  event_append "$task_dir" "verification_$result" \
+    "$(jq -c -n --arg id "$vid" --arg cmd "$cmdline" --argjson code "$code" \
+      --arg tail "$(tail -c 2000 "$vdir/$vid.stdout" 2>/dev/null || true)" \
+      '{verification: $id, command: $cmd, exit_code: $code, output_tail: $tail}')"
+  lock_release
+
+  if [ "$json_out" -eq 1 ]; then
+    cat "$vdir/$vid.json"
+  else
+    echo "VERIFICATION: $vid $result (exit $code)"
+    echo "COMMAND: $cmdline"
+    echo "CWD: $work"
+    echo "--- OUTPUT ---"
+    tail -c 4000 "$vdir/$vid.stdout" 2>/dev/null || true
+    tail -c 4000 "$vdir/$vid.stderr" 2>/dev/null || true
+  fi
+  [ "$result" = "passed" ] && return 0
+  [ "$result" != "error" ] || exit 2
+  exit 1
+}
+
+# ------------------------------------------------------------------- decisions
+
+# record_decision TASKDIR DECISION REASON [ATTEMPT] — caller holds the lock.
+record_decision() {
+  local dir="$1" decision="$2" why="$3" attempt="${4:-}"
+  task_update "$dir" \
+    '.disposition = {decision: $decision, reason: $reason, at: $_now}' \
+    --arg decision "$decision" --arg reason "$why"
+  event_append "$dir" supervisor_decision \
+    "$(jq -c -n --arg decision "$decision" --arg reason "$why" --arg attempt "$attempt" \
+      --arg verification "$(json_read "$dir/task.json" '.outcome.verification')" \
+      --arg worker "$(json_read "$dir/task.json" '.outcome.worker')" \
+      '{decision: $decision, reason: $reason,
+        attempt: (if $attempt == "" then null else $attempt end),
+        worker_outcome_at_decision: $worker,
+        verification_at_decision: $verification}')"
+}
+
+do_decide() {
+  require_task "${positionals[0]:-}" || die "cannot record a decision on a pre-Task job directory"
+  local decision="${positionals[1]:-}"
+  case "$decision" in
+    accept|retry|reject|cancel|take_over|continue_waiting) ;;
+    "") die "decide requires a decision: accept|retry|reject|cancel|take_over|continue_waiting" ;;
+    *)  die "unknown decision: $decision (want accept|retry|reject|cancel|take_over|continue_waiting)" ;;
+  esac
+  case "$decision" in
+    retry|reject|take_over)
+      [ -n "$reason" ] || die "--reason is required for '$decision'" ;;
+  esac
+  if [ "$decision" = "cancel" ]; then
+    positionals=("$task_id")
+    do_cancel
+    return
+  fi
+  lock_acquire "$task_dir"
+  case "$decision" in
+    accept|reject|take_over)
+      ! attempt_running "$task_dir" \
+        || die "attempt $(json_read "$task_dir/task.json" '.current_attempt') is still running; wait for it or cancel it first" ;;
+  esac
+  case "$(task_state "$task_dir"):$decision" in
+    accepted:*|cancelled:*|taken_over:*|rejected:accept|rejected:reject|rejected:retry|rejected:continue_waiting)
+      die "task $task_id is $(task_state "$task_dir"); decision '$decision' is not allowed" ;;
+  esac
+
+  record_decision "$task_dir" "$decision" "$reason" "$(json_read "$task_dir/task.json" '.current_attempt')"
+  case "$decision" in
+    accept)
+      task_update "$task_dir" '.state = "accepted" | .outcome.supervisor = "accepted" | .recommended_action = "none"'
+      event_append "$task_dir" task_accepted \
+        "$(jq -c -n --arg reason "$reason" --arg verification "$(json_read "$task_dir/task.json" '.outcome.verification')" \
+          '{reason: $reason, verification_at_acceptance: $verification}')" ;;
+    reject)
+      task_update "$task_dir" '.state = "rejected" | .outcome.supervisor = "rejected" | .recommended_action = "take_over"'
+      event_append "$task_dir" task_rejected "$(jq -c -n --arg reason "$reason" '{reason: $reason}')" ;;
+    take_over)
+      task_update "$task_dir" '.state = "taken_over" | .outcome.supervisor = "taken_over" | .recommended_action = "none"'
+      event_append "$task_dir" supervisor_takeover "$(jq -c -n --arg reason "$reason" '{reason: $reason}')" ;;
+    retry)
+      task_update "$task_dir" '.outcome.supervisor = "retry" | .recommended_action = "resume_same_session"' ;;
+    continue_waiting)
+      task_update "$task_dir" '.outcome.supervisor = "continue_waiting"' ;;
+  esac
+  lock_release
+  emit_status
+}
+
+# ------------------------------------------------------------------ inspection
+
+do_list() {
+  local d rows
+  rows="$(
+    for d in "$state_root"/task_*/; do
+      [ -f "${d}task.json" ] || continue
+      jq -c '{task_id, title, state, outcome, attempt_count, current_attempt,
+              session_id, model, cwd, created_at, updated_at,
+              failure_class, recommended_action, verification_count}' "${d}task.json" 2>/dev/null || true
+    done | jq -s --argjson active "$only_active" --argjson limit "$limit" \
+      'sort_by(.updated_at) | reverse
+       | (if $active == 1 then map(select(.state == "running" or .state == "awaiting_supervisor")) else . end)
+       | .[0:$limit]'
+  )"
+  if [ "$json_out" -eq 1 ]; then
+    echo "$rows"
+  else
+    if [ "$(echo "$rows" | jq 'length')" -eq 0 ]; then echo "no tasks in $state_root"; return 0; fi
+    echo "$rows" | jq -r '
+      (["TASK","STATE","WORKER","VERIF","ATT","UPDATED","TITLE"] | @tsv),
+      (.[] | [.task_id, .state, .outcome.worker, .outcome.verification,
+              (.attempt_count | tostring), .updated_at, (.title // "-")] | @tsv)' \
+      | column -t -s "$(printf '\t')" 2>/dev/null \
+      || echo "$rows" | jq -r '.[] | "\(.task_id)  \(.state)  \(.outcome.worker)  \(.title // "-")"'
+  fi
+}
+
+do_show() {
+  require_task "${positionals[0]:-}" || legacy_emit
+  lock_acquire "$task_dir"
+  if [ "$json_out" -eq 1 ]; then json_task "$task_dir" --full; lock_release; return 0; fi
+  json_task "$task_dir" --full | jq -r '
+    "TASK: \(.task_id)",
+    "TITLE: \(.title // "-")",
+    "STATE: \(.state)",
+    "CWD: \(.cwd)",
+    "MODEL: \(.model)   AGENT: \(.agent)",
+    "SESSION: \(.session_id // "unknown")",
+    "OUTCOME: transport=\(.outcome.transport) worker=\(.outcome.worker) verification=\(.outcome.verification) supervisor=\(.outcome.supervisor)",
+    (if .failure_class then "FAILURE: \(.failure_class)" else empty end),
+    "NEXT: \(.recommended_action)",
+    (if .disposition then "DISPOSITION: \(.disposition.decision) — \(.disposition.reason // "no reason recorded") (\(.disposition.at))" else empty end),
+    "",
+    "ATTEMPTS (\(.attempt_count)):",
+    (.attempts[] |
+      "  \(.attempt_id) \(.kind)\(if .retry_of then " of \(.retry_of)" else "" end)"
+      + " session=\(.session_id // .requested_session // "-")"
+      + " transport=\(.transport) worker=\(.worker)"
+      + "\(if .failure_class then " failure=\(.failure_class)" else "" end)"
+      + "\(if .authoritative == false then " [stale]" else "" end)"),
+    "",
+    "VERIFICATIONS (\(.verifications | length)):",
+    (.verifications[] | "  \(.verification_id) \(.result) exit=\(.exit_code) — \(.command)"),
+    "",
+    "HISTORY:",
+    (.events[] | "  \(.seq | tostring) \(.ts) \(.type)"
+      + "\(if .attempt then " attempt=\(.attempt)" else "" end)"
+      + "\(if .verification then " \(.verification)" else "" end)"
+      + "\(if .command then " command=\(.command)" else "" end)"
+      + "\(if .decision then " decision=\(.decision)" else "" end)"
+      + "\(if .question then " question=\(.question)" else "" end)"
+      + "\(if .reason then " — \(.reason)" else "" end)")'
+  lock_release
+}
+
+do_attempts() {
+  require_task "${positionals[0]:-}" || legacy_emit
+  local a out
+  lock_acquire "$task_dir"
+  out="$(for a in "$task_dir"/attempts/attempt_*/; do [ -d "$a" ] && json_attempt "${a%/}"; done | jq -s '.')"
+  if [ "$json_out" -eq 1 ]; then echo "$out"; else
+    echo "$out" | jq -r '.[] |
+      "\(.attempt_id) \(.kind)\(if .retry_of then " (retry of \(.retry_of))" else "" end)",
+      "  request: \(.attempt_dir)/request.md",
+      "  session: \(.session_id // .requested_session // "-")  reused=\(.session_reused)",
+      "  transport=\(.transport) worker=\(.worker) exit=\(.exit_code // "-")",
+      "  reason: \(.reason // "-")",
+      ""'
+  fi
+  lock_release
+}
+
+do_events() {
+  require_task "${positionals[0]:-}" || legacy_emit
+  lock_acquire "$task_dir"
+  if [ "$json_out" -eq 1 ]; then
+    jq -s '.' "$task_dir/events.jsonl"
+  else
+    jq -r '"\(.seq)\t\(.ts)\t\(.type)\t\(. | del(.seq, .ts, .type) | tojson)"' "$task_dir/events.jsonl"
+  fi
+  lock_release
+}
+
+do_logs() {
+  require_task "${positionals[0]:-}" || legacy_emit
+  local attempt file
+  attempt="${positionals[1]:-$(json_read "$task_dir/task.json" '.current_attempt')}"
+  [ -n "$attempt" ] && [ "$attempt" != "null" ] || die "task $task_id has no attempts yet"
+  [ -d "$task_dir/attempts/$attempt" ] || die "unknown attempt: $attempt (see: delegate.sh attempts $task_id)"
+  case "$stream" in
+    report)   file="worker-report.txt" ;;
+    request)  file="request.md" ;;
+    raw)      file="raw.jsonl" ;;
+    stderr)   file="stderr.log" ;;
+    progress) file="provider-progress.json" ;;
+    result)   file="result.json" ;;
+    meta)     file="meta.json" ;;
+    changed)  file="changed-files.txt" ;;
+    *) die "unknown stream: $stream (want report|request|raw|stderr|progress|result|meta|changed)" ;;
+  esac
+  [ -f "$task_dir/attempts/$attempt/$file" ] \
+    || die "no $stream for $task_id/$attempt (retention may have pruned it)"
+  cat "$task_dir/attempts/$attempt/$file"
+}
+
+do_recover() {
+  local d id out results=()
+  for d in "$state_root"/task_*/; do
+    [ -f "${d}task.json" ] || continue
+    id="$(basename "${d%/}")"
+    out="$(reconcile_task "${d%/}")"
+    results+=("$(jq -c -n --arg id "$id" --arg finding "$out" \
+      --arg state "$(task_state "${d%/}")" \
+      --arg attempt "$(json_read "${d}task.json" '.current_attempt')" \
+      '{task_id: $id, reconciliation: $finding, state: $state, current_attempt: $attempt}')")
+  done
+  if [ "${#results[@]}" -eq 0 ]; then
+    [ "$json_out" -eq 1 ] && echo '[]' || echo "no tasks in $state_root"
+    return 0
+  fi
+  if [ "$json_out" -eq 1 ]; then
+    printf '%s\n' "${results[@]}" | jq -s '.'
+  else
+    printf '%s\n' "${results[@]}" | jq -r '"\(.task_id)  \(.reconciliation)  state=\(.state)  attempt=\(.current_attempt // "-")"'
+  fi
 }
 
 # -------------------------------------------------------------------- dispatch
 
-if [ -n "$runner_jobdir" ]; then
+if [ -n "$runner_attemptdir" ]; then
   spec="${positionals[0]:-}"
   do_run
   exit 0
@@ -582,22 +1130,25 @@ case "$op" in
   "")
     if [ -n "$wait_job" ]; then op="wait"; else op="start"; spec="${positionals[0]:-}"; fi
     ;;
-  start|run)  spec="${positionals[0]:-}" ;;
-  resume)
-    resume="${positionals[0]:-}"
-    spec="${positionals[1]:-}"
-    [ -n "$resume" ] || die "resume requires a session id: delegate.sh resume SESSION_ID \"<fix>\""
-    op="start"
-    ;;
-  status|wait|cancel) wait_job="${positionals[0]:-$wait_job}" ;;
+  start|run) spec="${positionals[0]:-}" ;;
 esac
 
 case "$op" in
-  start)  do_start ;;
-  run)    do_blocking_run ;;
-  status) do_status ;;
-  wait)   do_wait ;;
-  cancel) do_cancel ;;
-  policy) do_policy ;;
-  *)      die "unknown operation: $op" ;;
+  start)    do_start ;;
+  run)      do_blocking_run ;;
+  retry)    do_retry; emit_launch ;;
+  resume)   do_resume; emit_launch ;;
+  status)   do_status ;;
+  wait)     do_wait ;;
+  cancel)   do_cancel ;;
+  verify)   do_verify ;;
+  decide)   do_decide ;;
+  list)     do_list ;;
+  show)     do_show ;;
+  attempts) do_attempts ;;
+  events)   do_events ;;
+  logs)     do_logs ;;
+  recover)  do_recover ;;
+  policy)   do_policy ;;
+  *)        die "unknown operation: $op" ;;
 esac
