@@ -128,10 +128,9 @@ if os.path.exists(path):
     with open(path) as f:
         data = json.load(f)
 allow = data.setdefault("permissions", {}).setdefault("allow", [])
-for skill in ("claude-subagent", "codex-subagent", "opencode-subagent"):
-    rule = f"Bash(bash {home}/.claude/skills/{skill}/scripts/delegate.sh:*)"
-    if rule not in allow:
-        allow.append(rule)
+rule = f"Bash(bash {home}/.claude/skills/opencode-subagent/scripts/delegate.sh:*)"
+if rule not in allow:
+    allow.append(rule)
 with open(path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
