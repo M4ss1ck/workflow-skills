@@ -102,6 +102,11 @@ doctor() {
       printf '%-10s MISSING\n' "$tool"
     fi
   done
+  if command -v opencode-delegate >/dev/null 2>&1; then
+    printf '%-10s ok    %s\n' "delegate" "$(command -v opencode-delegate)"
+  else
+    printf '%-10s none  opencode-delegate not on PATH (run install.sh to add it)\n' "delegate"
+  fi
   local worker="$HOME/.config/opencode/agent/workflow-worker.md"
   if [ -e "$worker" ]; then
     printf '%-10s ok    %s\n' "worker" "$worker"
@@ -117,6 +122,37 @@ doctor() {
   fi
 }
 
+# Agents reach delegate.sh from whatever cwd they happen to be in, and guessing
+# a relative path is the single most common way they fail to reach it at all.
+# One name on PATH, pointing at this checkout, works from every host.
+install_delegate_command() {
+  local src="$repo_root/skills/opencode-subagent/scripts/delegate.sh"
+  local bin_dir="$HOME/.local/bin"
+  local dest="$bin_dir/opencode-delegate"
+  local current=""
+
+  [ -f "$src" ] || return 0
+
+  if [ -L "$dest" ]; then
+    current="$(readlink "$dest")"
+  elif [ -e "$dest" ]; then
+    echo "command  opencode-delegate -> $dest exists and is not a symlink; leaving it alone" >&2
+    return 0
+  fi
+
+  mkdir -p "$bin_dir"
+  if [ -n "$current" ] && [ "$current" != "$src" ]; then
+    echo "command  opencode-delegate REPOINTED from $current"
+  fi
+  ln -sfn "$src" "$dest"
+  echo "command  opencode-delegate -> $dest"
+
+  case ":$PATH:" in
+    *":$bin_dir:"*) ;;
+    *) echo "command  NOTE: $bin_dir is not on your PATH; add it or call the script by path" >&2 ;;
+  esac
+}
+
 setup_claude_permissions() {
   command -v python3 >/dev/null 2>&1 || { echo "skip: python3 required to edit ~/.claude/settings.json" >&2; return 0; }
   python3 - "$HOME/.claude/settings.json" "$HOME" <<'PY'
@@ -128,9 +164,13 @@ if os.path.exists(path):
     with open(path) as f:
         data = json.load(f)
 allow = data.setdefault("permissions", {}).setdefault("allow", [])
-rule = f"Bash(bash {home}/.claude/skills/opencode-subagent/scripts/delegate.sh:*)"
-if rule not in allow:
-    allow.append(rule)
+rules = [
+    f"Bash(bash {home}/.claude/skills/opencode-subagent/scripts/delegate.sh:*)",
+    "Bash(opencode-delegate:*)",
+]
+for rule in rules:
+    if rule not in allow:
+        allow.append(rule)
 with open(path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
@@ -162,7 +202,9 @@ data = {}
 if os.path.exists(path):
     with open(path) as f:
         data = json.load(f)
-data.setdefault("permission", {}).setdefault("bash", {})["*delegate.sh*"] = "allow"
+bash_rules = data.setdefault("permission", {}).setdefault("bash", {})
+bash_rules["*delegate.sh*"] = "allow"
+bash_rules["*opencode-delegate*"] = "allow"
 with open(path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
@@ -267,6 +309,8 @@ install_opencode_agents() {
 for target in "${targets[@]}"; do
   install_into "$target"
 done
+
+install_delegate_command
 
 for host in ${selected_hosts[@]+"${selected_hosts[@]}"}; do
   if [ "$host" = "opencode" ]; then

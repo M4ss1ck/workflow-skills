@@ -46,10 +46,28 @@ if [ -L "$tmp_home/.agents/skills/report-changes" ]; then
   exit 1
 fi
 
+# the PATH entry is installed and actually RUNS from another cwd — asserting the
+# symlink exists would miss the script failing to find its own skill directory
+delegate_bin="$tmp_home/.local/bin/opencode-delegate"
+[ -L "$delegate_bin" ] || { echo "FAIL  expected $delegate_bin" >&2; exit 1; }
+out="$(cd / && HOME="$tmp_home" XDG_CONFIG_HOME="$tmp_home/.config" PATH="$tmp_home/.local/bin:$PATH" opencode-delegate policy 2>&1)" \
+  || { echo "FAIL  opencode-delegate on PATH does not run: $out" >&2; exit 1; }
+echo "$out" | grep -q '^DELEGATION_POLICY:' \
+  || { echo "FAIL  opencode-delegate ran but lost its skill dir: $out" >&2; exit 1; }
+
+# repointing an existing link at a different checkout is announced, not silent
+ln -sfn /nonexistent/other/checkout/delegate.sh "$delegate_bin"
+out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null)"
+echo "$out" | grep -q 'REPOINTED' || { echo "FAIL  repointing was not announced: $out" >&2; exit 1; }
+
 # --subagent-permissions writes claude allow rules, idempotently
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude --subagent-permissions </dev/null >/dev/null
 grep -q 'opencode-subagent/scripts/delegate.sh' "$tmp_home/.claude/settings.json" \
   || { echo "FAIL  claude settings.json missing delegate allow rule" >&2; exit 1; }
+# the bare PATH name matches neither the path rule nor the *delegate.sh* glob,
+# so it needs its own rule or every delegation starts prompting again
+grep -q 'Bash(opencode-delegate:\*)' "$tmp_home/.claude/settings.json" \
+  || { echo "FAIL  claude settings.json missing opencode-delegate allow rule" >&2; exit 1; }
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude --subagent-permissions </dev/null >/dev/null
 count="$(grep -c 'opencode-subagent/scripts/delegate.sh' "$tmp_home/.claude/settings.json")"
 if [ "$count" -ne 1 ]; then
@@ -72,6 +90,8 @@ fi
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent opencode --subagent-permissions </dev/null >/dev/null
 grep -q 'delegate.sh' "$tmp_home/.config/opencode/opencode.json" \
   || { echo "FAIL  opencode.json missing delegate.sh permission" >&2; exit 1; }
+grep -q 'opencode-delegate' "$tmp_home/.config/opencode/opencode.json" \
+  || { echo "FAIL  opencode.json missing opencode-delegate permission" >&2; exit 1; }
 
 # without the flag and without a TTY, nothing is written
 rm -rf "$tmp_home/.claude/settings.json"
