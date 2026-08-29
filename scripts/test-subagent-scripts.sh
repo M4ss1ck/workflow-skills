@@ -24,6 +24,7 @@ run_delegate() {
   STUB_FRESH_HANG="${STUB_FRESH_HANG:-0}" \
   STUB_NO_FINAL="${STUB_NO_FINAL:-0}" \
   STUB_DB_FAIL="${STUB_DB_FAIL:-0}" \
+  STUB_STEPS="${STUB_STEPS:-1}" \
   STUB_FINISH_DRIFT="${STUB_FINISH_DRIFT:-0}" \
   STUB_STATUS="${STUB_STATUS:-DONE}" \
   XDG_STATE_HOME="$stub_dir/state" \
@@ -135,6 +136,13 @@ sleep "${STUB_SLEEP:-0}"
 if [ "${STUB_NO_FINAL:-0}" != "1" ]; then
   printf 'msg_oc_final_%s\n' "$turn" >"${STUB_DIR}/opencode-final.id"
 fi
+# A real multi-step turn emits one step_finish per step, each carrying that
+# step's own cost.
+i=1
+while [ "$i" -lt "${STUB_STEPS:-1}" ]; do
+  echo '{"type":"step_finish","timestamp":2,"sessionID":"ses_oc1","part":{"type":"step-finish","cost":0.0042,"tokens":{"total":100,"input":10,"output":5}}}'
+  i=$((i + 1))
+done
 jq -c -n --arg t "$(worker_report)" \
   '{type:"text",timestamp:2,sessionID:"ses_oc1",part:{type:"text",text:$t}}'
 cat <<'EOF'
@@ -160,6 +168,19 @@ echo "$out" | grep -q '^DELEGATION_POLICY:' || fail "opencode: symlinked invocat
 # the usage block must not silently truncate as the header grows
 out="$(run_delegate "$oc" --help)"
 echo "$out" | grep -q 'Legacy forms still accepted' || fail "opencode: --help truncates the header: $out"
+
+# --- attempt cost -----------------------------------------------------------
+
+# step_finish carries that step's own cost, not a running total: reporting the
+# last one under-reports every multi-step turn
+mkdir -p "$(dirname "$conf_file")"
+echo 'OPENCODE_SUBAGENT_MODEL=stub/conf-model' >"$conf_file"
+out="$(STUB_STEPS=3 run_delegate "$oc" run --json "cost task")"
+echo "$out" | jq -e '(.cost_usd * 10000 | round) == 126' >/dev/null \
+  || fail "opencode: attempt cost is not the sum of its steps: $(echo "$out" | jq -c '{cost_usd}')"
+# close it: later tests resolve a Task by session id, which needs one open owner
+run_delegate "$oc" decide "$(echo "$out" | jq -r .task_id)" accept --reason "cost fixture" >/dev/null
+rm -f "$conf_file"
 
 # --- delegation policy ------------------------------------------------------
 

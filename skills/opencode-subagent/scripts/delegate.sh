@@ -313,7 +313,7 @@ stream_final_report() {
   jq -rs '
     ([to_entries[] | select(.value.type? == "step_finish") | .key] | last) as $finish
     | if $finish == null then empty
-      else ([to_entries[] | select(.key < $finish and .value.type? == "text") | .value.part.text? // empty] | last // empty)
+      else ([to_entries[] | select(.key < $finish and .value.type? == "text") | .value.part.text? // empty] | if length == 0 then empty else add end)
       end' "$1" 2>/dev/null || true
 }
 
@@ -462,7 +462,8 @@ do_run() {
 
   session="${resume:-$(stream_session "$dir/raw.jsonl")}"
   [ -z "$session" ] || announce_session "$session"
-  cost="$(jq -rs '[.[] | select(.type? == "step_finish") | .part.cost? // empty] | last // empty' "$dir/raw.jsonl" 2>/dev/null || true)"
+  # .part.cost is per step, not cumulative: the attempt cost is their sum.
+  cost="$(jq -rs '[.[] | select(.type? == "step_finish") | .part.cost? // empty] | if length == 0 then empty else add end' "$dir/raw.jsonl" 2>/dev/null || true)"
   report="$(stream_final_report "$dir/raw.jsonl")"
 
   if [ "$db_available" -eq 1 ] && [ -n "$session" ]; then
