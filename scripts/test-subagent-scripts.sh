@@ -605,6 +605,19 @@ set -e
 echo "$res" | jq -e '.liveness.process_alive == true and .task_state == "running"' >/dev/null \
   || fail "opencode: liveness missing from status --json: $res"
 
+# idle must come from what the provider recorded, not from the snapshot file's
+# mtime: the poller rewrites that file on a fixed interval, so its age can never
+# exceed the poll interval and possibly_stalled could never fire
+adir="$td/attempts/$(jq -r '.current_attempt' "$td/task.json")"
+jq -n --argjson t "$(( $(date +%s) * 1000 - 4000 * 1000 ))" '[{time_created: $t, type: "text"}]' \
+  >"$adir/provider-progress.json"
+touch "$adir/provider-progress.json" "$adir/raw.jsonl"
+set +e
+res="$(run_delegate "$oc" status "$task" --json)"
+set -e
+echo "$res" | jq -e '.liveness.last_provider_activity_seconds > 3000' >/dev/null \
+  || fail "opencode: provider activity read from file mtime, not recorded rows: $res"
+
 # verification must not run inside the worker's turn
 set +e
 msg="$(run_delegate "$oc" verify "$task" -- true 2>&1)"

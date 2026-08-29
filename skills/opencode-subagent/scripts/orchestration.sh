@@ -400,6 +400,21 @@ attempt_signal() {
   fi
 }
 
+# Seconds since the newest row the provider actually recorded. The snapshot
+# file's own mtime is not that: the poller rewrites it on a fixed interval, so
+# its age measures the poller and never exceeds the poll interval.
+provider_activity_seconds() {
+  local f="$1" newest age
+  [ -s "$f" ] || { echo null; return 0; }
+  newest="$(jq -r '[.[].time_created? // empty] | max // empty' "$f" 2>/dev/null || true)"
+  case "$newest" in
+    ''|*[!0-9]*) echo null; return 0 ;;
+  esac
+  age=$(( $(now_epoch) - newest / 1000 ))
+  [ "$age" -ge 0 ] || age=0
+  echo "$age"
+}
+
 file_age_seconds() {
   local f="$1" mtime
   [ -e "$f" ] || { echo null; return 0; }
@@ -418,7 +433,7 @@ attempt_liveness() {
   jq -n \
     --argjson alive "$alive" \
     --argjson elapsed "$elapsed" \
-    --argjson provider "$(file_age_seconds "$dir/provider-progress.json")" \
+    --argjson provider "$(provider_activity_seconds "$dir/provider-progress.json")" \
     --argjson output "$(file_age_seconds "$dir/raw.jsonl")" \
     --argjson threshold "$stall" \
     '(

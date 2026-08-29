@@ -289,7 +289,13 @@ snapshot_provider_progress() {
   local tmp="$dir/provider-progress.json.tmp"
   session_sql="$(sql_quote "$session_id")"
   if opencode db "SELECT time_created, message_id, json_extract(data, '$.type') AS type, json_extract(data, '$.tool') AS tool, json_extract(data, '$.state.status') AS status, substr(json_extract(data, '$.text'), 1, 2000) AS text FROM part WHERE session_id=$session_sql ORDER BY time_created DESC LIMIT 100" --format json >"$tmp" 2>/dev/null; then
-    mv "$tmp" "$dir/provider-progress.json"
+    # Replace only on change, so the file's mtime means "the worker did
+    # something" rather than "the poller ran".
+    if cmp -s "$tmp" "$dir/provider-progress.json"; then
+      rm -f "$tmp"
+    else
+      mv "$tmp" "$dir/provider-progress.json"
+    fi
   else
     rm -f "$tmp"
   fi
