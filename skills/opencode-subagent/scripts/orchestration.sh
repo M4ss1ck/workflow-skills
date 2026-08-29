@@ -129,6 +129,34 @@ trap 'lock_release' EXIT
 
 json_read() { jq -r "$2" "$1" 2>/dev/null || true; }
 
+# Two attempts collide when they write to the same working tree, which is the
+# git worktree root — not the cwd, since one may be launched from a subdirectory
+# of the other. Outside a repo, the resolved directory is the best we can do.
+worktree_key() {
+  local dir="$1" top
+  [ -d "$dir" ] || { printf '%s\n' "$dir"; return 0; }
+  top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$top" ]; then printf '%s\n' "$top"; else (cd "$dir" && pwd -P); fi
+}
+
+# tasks_live_in_tree KEY [EXCLUDE_TASK_ID] — Tasks with a running attempt whose
+# working tree is KEY. The cheap state check comes first: resolving a worktree
+# for every Task on disk would cost one git call per historical Task.
+tasks_live_in_tree() {
+  local key="$1" exclude="${2:-}" d id tcwd
+  for d in "$state_root"/task_*/; do
+    [ -f "$d/task.json" ] || continue
+    id="$(basename "$d")"
+    [ "$id" != "$exclude" ] || continue
+    [ "$(task_state "$d")" = "running" ] || continue
+    attempt_running "$d" || continue
+    tcwd="$(json_read "$d/task.json" '.cwd')"
+    [ -n "$tcwd" ] || continue
+    [ "$(worktree_key "$tcwd")" = "$key" ] || continue
+    printf '%s\n' "$id"
+  done
+}
+
 # ---------------------------------------------------------------------- events
 
 # event_append TASKDIR TYPE [PAYLOAD_JSON]
@@ -694,7 +722,15 @@ attempt_write_result() {
     --argjson elapsed "$(( $(now_epoch) - ${started:-0} ))" \
     --rawfile report "$adir/worker-report.txt" \
     --rawfile changed "$adir/changed-files.txt" \
-    '$parsed + {
+    'def normalize_reported_path:
+         gsub("`"; "")
+       | sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "")
+       | sub("^\\./"; "")
+       | sub("[[:space:]]*\\(.*$"; "")
+       | sub("[[:space:]]+[-\u2014\u2013][[:space:]].*$"; "")
+       | sub("[[:space:]]+$"; "");
+     def is_pathlike: (length > 0) and ((test("[[:space:]]")) | not);
+     $parsed + {
       transport: $transport,
       exit_code: $code,
       session_id: (if $session == "" then null else $session end),
@@ -706,7 +742,15 @@ attempt_write_result() {
       report: $report,
       changed_files: ($changed | split("\n") | map(select(length > 0))),
       authoritative: null
-    }' | write_atomic "$adir/result.json"
+    }
+    # The tree diff is the objective record and keeps its meaning. Crossing it
+    # with what the worker said it touched only splits it into two views: what
+    # this attempt claims, and what it did not account for — a second worker in
+    # the same tree, or a file the worker forgot to list.
+    | (.worker_files_changed | map(normalize_reported_path) | map(select(is_pathlike))) as $claimed
+    | .worker_attributed_files = (.changed_files | map(select(. as $f | $claimed | index($f))))
+    | .unattributed_files = (.changed_files - .worker_attributed_files)
+    ' | write_atomic "$adir/result.json"
 }
 
 # ------------------------------------------------------------------- rendering
@@ -792,6 +836,8 @@ json_status() {
     | .liveness = ($attempt.liveness // null)
     | .report = (if ($attempt.transport // "running") == "running" then null else ($attempt.report // null) end)
     | .changed_files = ($attempt.changed_files // [])
+    | .worker_attributed_files = ($attempt.worker_attributed_files // [])
+    | .unattributed_files = ($attempt.unattributed_files // [])
     | .state = (if ($attempt.transport // "running") == "running" then "running"
                 else $legacy end)' \
     --arg legacy "$(legacy_state_for \

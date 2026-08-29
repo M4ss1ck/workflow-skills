@@ -162,7 +162,7 @@ bash scripts/delegate.sh resume SESSION "Use write-through caching."
 
 Answer it and resume the same session. Do not re-delegate the same ambiguity.
 
-**One delegation at a time per worktree.** The worker edits your working tree; concurrent workers would collide. Parallel fan-out needs separate git worktrees, which this wrapper does not manage.
+**Concurrent delegations are allowed.** Nothing serializes them: several Tasks may run at once, in one worktree or across several. Two well-scoped tasks in one tree do not fight over files, but the launch-to-finish tree diff cannot tell their edits apart, so the wrapper says so on stderr at launch and you review `worker_attributed_files` instead of `changed_files`.
 
 ## Operations
 
@@ -224,7 +224,8 @@ Add `--json` to any operation. `status`/`wait`/`start`/`run` return the flat vie
 - `task_state`: `created` · `running` · `awaiting_supervisor` · `accepted` · `rejected` · `cancelled` · `taken_over`.
 - `state` is the older per-attempt vocabulary (`running`/`completed`/`incomplete`/`failed`/`timeout`/`cancelled`), kept for compatibility.
 - `liveness` is non-null only while an attempt runs: `process_alive`, `elapsed_seconds`, `last_provider_activity_seconds`, `idle_seconds`, `possibly_stalled`. It comes from provider telemetry, not from heartbeat messages. `possibly_stalled` is a hint — never cancel on it alone. The hard timeout remains the only automatic stop.
-- `changed_files` is the worktree diff between launch and finish — a review aid, not an audit log: a file already dirty in the same way is invisible to it.
+- `changed_files` is the worktree diff between launch and finish — a review aid, not an audit log: a file already dirty in the same way is invisible to it. It stays the objective record and is never filtered.
+- `worker_attributed_files` is that diff narrowed to what the worker itself reported touching, and `unattributed_files` is the remainder — a file the worker forgot to list, or another attempt's edit in the same tree. The worker is untrusted, so read these as a split of the diff, never as a replacement for it.
 
 `show TASK --json` adds the full `attempts[]`, `verifications[]` and `events[]` arrays.
 

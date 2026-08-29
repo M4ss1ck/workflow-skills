@@ -25,6 +25,7 @@ run_delegate() {
   STUB_NO_FINAL="${STUB_NO_FINAL:-0}" \
   STUB_DB_FAIL="${STUB_DB_FAIL:-0}" \
   STUB_STEPS="${STUB_STEPS:-1}" \
+  STUB_FILES="${STUB_FILES:-- foo.txt}" \
   STUB_FINISH_DRIFT="${STUB_FINISH_DRIFT:-0}" \
   STUB_STATUS="${STUB_STATUS:-DONE}" \
   XDG_STATE_HOME="$stub_dir/state" \
@@ -60,7 +61,7 @@ printf '%s\n' "$*" >>"${STUB_DIR}/opencode.args"
 # block; STUB_STATUS picks which semantic outcome this turn reports.
 worker_report() {
   printf 'STATUS: %s\n' "${STUB_STATUS:-DONE}"
-  printf 'FILES_CHANGED:\n- foo.txt\n'
+  printf 'FILES_CHANGED:\n%s\n' "${STUB_FILES:-- foo.txt}"
   printf 'VERIFICATION:\nstub check -> pass\n'
   if [ "${STUB_STATUS:-DONE}" = "BLOCKED" ]; then
     printf 'QUESTION:\nShould the cache be write-through or write-back?\n'
@@ -120,6 +121,7 @@ if [ "${1:-}" = "db" ]; then
 fi
 echo "stub banner noise (must stay out of raw.jsonl)" >&2
 case "$*" in *touch-artifact*) : >"$PWD/worker-artifact.txt" ;; esac
+case "$*" in *touch-two*) : >"$PWD/worker-artifact.txt"; : >"$PWD/other-artifact.txt" ;; esac
 turn="$$-$RANDOM"
 rm -f "${STUB_DIR}/opencode-final.id"
 printf 'msg_oc_assistant_%s\n' "$turn" >"${STUB_DIR}/opencode-assistant.id"
@@ -970,6 +972,30 @@ git -C "$work_repo" init -q
 res="$(cd "$work_repo" && run_delegate "$oc" run --json "touch-artifact")"
 echo "$res" | jq -e '.changed_files | index("worker-artifact.txt")' >/dev/null \
   || fail "opencode: changed_files did not report the worker's new file: $res"
+
+# the tree diff is split, never filtered: the worker's own list attributes part
+# of it, and the rest is reported as unattributed rather than dropped. The
+# reported path is backticked and annotated, as real workers write it.
+split_repo="$stub_dir/work-split"
+mkdir -p "$split_repo"
+git -C "$split_repo" init -q
+res="$(cd "$split_repo" && STUB_FILES='- `worker-artifact.txt` (new — placeholder)' \
+  run_delegate "$oc" run --json "touch-two")"
+echo "$res" | jq -e '(.changed_files | index("worker-artifact.txt")) and (.changed_files | index("other-artifact.txt"))' >/dev/null \
+  || fail "opencode: changed_files must keep the whole tree diff: $res"
+echo "$res" | jq -e '.worker_attributed_files == ["worker-artifact.txt"]' >/dev/null \
+  || fail "opencode: backticked/annotated worker path was not attributed: $(echo "$res" | jq -c '{worker_attributed_files, unattributed_files}')"
+echo "$res" | jq -e '.unattributed_files == ["other-artifact.txt"]' >/dev/null \
+  || fail "opencode: file the worker did not report is not flagged unattributed: $res"
+
+# a worker that reports no files at all must not empty the supervisor's review
+prose_repo="$stub_dir/work-prose"
+mkdir -p "$prose_repo"
+git -C "$prose_repo" init -q
+res="$(cd "$prose_repo" && STUB_FILES='- Stage 1 core domain files' \
+  run_delegate "$oc" run --json "touch-artifact")"
+echo "$res" | jq -e '(.changed_files | length) > 0 and (.worker_attributed_files | length) == 0' >/dev/null \
+  || fail "opencode: prose FILES_CHANGED must attribute nothing yet keep the diff: $res"
 
 # --- legacy state ------------------------------------------------------------
 

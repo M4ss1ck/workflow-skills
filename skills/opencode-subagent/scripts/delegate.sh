@@ -716,6 +716,16 @@ spawn_attempt() {
   persist_process_identity "$adir/process.json" "$pid"
 }
 
+# Parallel delegations are allowed: well-scoped tasks in one tree do not fight.
+# But the launch-to-finish tree diff cannot tell two workers apart, so say so
+# once, on stderr, where it cannot corrupt --json output.
+warn_shared_tree() {
+  local exclude="${1:-}" others
+  others="$(tasks_live_in_tree "$(worktree_key "${cwd:-$PWD}")" "$exclude" | paste -sd, - || true)"
+  [ -n "$others" ] || return 0
+  echo "NOTE: another delegation is live in this worktree ($others); changed_files cannot tell the two apart — compare worker_attributed_files" >&2
+}
+
 do_launch() {
   [ -n "$spec" ] || die "missing task spec"
   preflight
@@ -726,6 +736,8 @@ do_launch() {
     task_id="task_$(date +%Y%m%d-%H%M%S)-$RANDOM"
     task_dir="$state_root/$task_id"
   done
+
+  warn_shared_tree "$task_id"
 
   lock_acquire "$task_dir"
   task_create "$task_dir" "$task_id" "${cwd:-$PWD}" "$model" "$hard_timeout" "$(task_title "$spec")"
