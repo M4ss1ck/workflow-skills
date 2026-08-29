@@ -53,7 +53,20 @@ default_retention_days=90
 default_raw_retention_days=7
 state_root="${XDG_STATE_HOME:-$HOME/.local/state}/workflow-skills/subagents"
 conf_file="${XDG_CONFIG_HOME:-$HOME/.config}/workflow-skills/subagents.conf"
-skill_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve our own path through symlinks: the script is reachable as
+# ~/.local/bin/opencode-delegate and as a symlinked skills directory, and
+# dirname of the *invocation* path would look for orchestration.sh next to the
+# link instead of next to the script.
+self_path="${BASH_SOURCE[0]}"
+while [ -L "$self_path" ]; do
+  self_link="$(readlink "$self_path")"
+  case "$self_link" in
+    /*) self_path="$self_link" ;;
+    *)  self_path="$(dirname "$self_path")/$self_link" ;;
+  esac
+done
+self_path="$(cd "$(dirname "$self_path")" && pwd)/$(basename "$self_path")"
+skill_dir="$(cd "$(dirname "$self_path")/.." && pwd)"
 agent_src="$skill_dir/agents/$agent_name.md"
 agent_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent"
 agent_dest="$agent_dir/$agent_name.md"
@@ -86,7 +99,8 @@ positionals=()
 # shellcheck source=skills/opencode-subagent/scripts/orchestration.sh
 . "$skill_dir/scripts/orchestration.sh"
 
-usage() { sed -n '2,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# The header block, however long it grows: everything up to the first line of code.
+usage() { sed -n '2,/^set -euo/p' "$self_path" | sed '$d' | sed 's/^# \{0,1\}//'; }
 die() { echo "ERROR: $1" >&2; exit "${2:-2}"; }
 
 op=""
@@ -686,9 +700,9 @@ spawn_attempt() {
   if [ -n "$resume" ]; then args+=(--resume "$resume"); fi
   git_porcelain "${cwd:-$PWD}" >"$adir/git-before.txt"
   if command -v setsid >/dev/null 2>&1; then
-    setsid bash "${BASH_SOURCE[0]}" "${args[@]}" "$spec" >/dev/null 2>"$adir/launcher.err" </dev/null &
+    setsid bash "$self_path" "${args[@]}" "$spec" >/dev/null 2>"$adir/launcher.err" </dev/null &
   else
-    nohup bash "${BASH_SOURCE[0]}" "${args[@]}" "$spec" >/dev/null 2>"$adir/launcher.err" </dev/null &
+    nohup bash "$self_path" "${args[@]}" "$spec" >/dev/null 2>"$adir/launcher.err" </dev/null &
   fi
   pid=$!
   printf '%s\n' "$pid" >"$adir/pid"

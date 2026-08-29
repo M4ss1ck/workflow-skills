@@ -146,6 +146,21 @@ chmod +x "$stub_dir/opencode"
 oc="$repo_root/skills/opencode-subagent/scripts/delegate.sh"
 oc_agent="$stub_dir/config/opencode/agent/workflow-worker.md"
 
+# --- invocation through a symlink -------------------------------------------
+
+# the script is reached as ~/.local/bin/opencode-delegate and through symlinked
+# skills directories, so it must resolve its own path, not the link's
+link_dir="$stub_dir/link-bin"
+mkdir -p "$link_dir"
+ln -sf "$oc" "$link_dir/opencode-delegate"
+out="$(run_delegate "$link_dir/opencode-delegate" policy 2>&1)" \
+  || fail "opencode: invocation through a symlink failed: $out"
+echo "$out" | grep -q '^DELEGATION_POLICY:' || fail "opencode: symlinked invocation lost its skill dir: $out"
+
+# the usage block must not silently truncate as the header grows
+out="$(run_delegate "$oc" --help)"
+echo "$out" | grep -q 'Legacy forms still accepted' || fail "opencode: --help truncates the header: $out"
+
 # --- delegation policy ------------------------------------------------------
 
 # an unconfigured conf is conservative, not permissive
