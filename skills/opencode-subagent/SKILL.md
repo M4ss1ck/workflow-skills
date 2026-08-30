@@ -119,7 +119,9 @@ delegate → inspect → wait → interpret the worker outcome → verify indepe
 
    If the user named a model, pass it exactly via `--model provider/model` — never substitute or "upgrade" their choice — and add `--save-default` the first time so it becomes the configured worker model (tell them it is saved).
 
-   Set your shell tool's own timeout above `--poll-timeout`. Exit 3 means still running: poll again, or check without blocking via `status TASK`. Never abandon a running task silently.
+   `wait` blocks until there is something worth reporting: the attempt ends, the provider goes quiet for longer than `--stall-seconds` (default 300), or the stream carries a provider error. A long `--poll-timeout` is safe because of that.
+
+   Set your shell tool's own timeout above `--poll-timeout`. Exit 3 means still running: poll again, or check without blocking via `status TASK`. **Exit 5 means still running but silent** — the worker has recorded nothing for the stall window. Decide: keep waiting, inspect the stream, or cancel. Do not immediately re-wait, which would spin until the hard timeout. Silence is not proof of a hang: a worker running one long command looks identical, so nothing is ever cancelled for it. Never abandon a running task silently.
 
 4. **Interpret the worker outcome** from `outcome.worker`, not from prose:
 
@@ -187,9 +189,9 @@ bash scripts/delegate.sh policy [off|explicit|auto]
 
 Decisions: `accept` · `retry` · `reject` · `cancel` · `take_over` · `continue_waiting`. `--reason` is required for `retry`, `reject` and `take_over` — the reason is the durable record of why.
 
-Options: `--model provider/model`, `--cwd DIR`, `--resume SESSION_ID`, `--new-session`, `--reason TEXT`, `--label TEXT`, `--timeout SECS` (default 1800), `--poll-timeout SECS`, `--save-default`, `--json`.
+Options: `--model provider/model`, `--cwd DIR`, `--resume SESSION_ID`, `--new-session`, `--reason TEXT`, `--label TEXT`, `--timeout SECS` (default 1800), `--poll-timeout SECS`, `--stall-seconds SECS` (default 300), `--no-stall-return`, `--save-default`, `--json`.
 
-Exit codes: `0` finished · `1` verification failed · `2` usage/config or verification-execution error · `3` still running · `4` incomplete turn, resume the session · `124` timeout · `127` missing CLI · `130` cancelled.
+Exit codes: `0` finished · `1` verification failed · `2` usage/config or verification-execution error · `3` still running · `4` incomplete turn, resume the session · `5` still running but stalled · `124` timeout · `127` missing CLI · `130` cancelled.
 
 `verify TASK -- CMD ARGS...` execs the argv; `verify TASK "cmd | cmd"` runs a shell line when you need pipes or `&&`.
 
@@ -288,6 +290,7 @@ It ends its turn with `STATUS` / `FILES_CHANGED` / `VERIFICATION` / `QUESTION` /
 ```ini
 OPENCODE_SUBAGENT_DELEGATION_POLICY=auto
 OPENCODE_SUBAGENT_MODEL=provider/some-cheap-coding-model
+OPENCODE_SUBAGENT_STALL_SECONDS=300
 OPENCODE_SUBAGENT_RETENTION_DAYS=90
 OPENCODE_SUBAGENT_RAW_RETENTION_DAYS=7
 ```

@@ -1028,6 +1028,57 @@ jq -n '{schema: 2, task_id: "task_sibling_live", state: "running", cwd: "/nonexi
   || fail "opencode: a live Task in another tree must not block verification"
 rm -rf "$sib_dir"
 
+# --- event-driven wait ------------------------------------------------------
+
+# wait returns early when the provider goes quiet for longer than the stall
+# threshold, with its own exit code: exit 3 tells the supervisor to poll again,
+# which for a stall would spin until the hard timeout
+stall_repo="$stub_dir/work-stall"
+mkdir -p "$stall_repo"
+git -C "$stall_repo" init -q
+export STUB_SLEEP=25
+out="$(cd "$stall_repo" && run_delegate "$oc" start "stalling task")"
+unset STUB_SLEEP
+stall_task="$(task_of "$out")"
+stall_dir="$(taskdir_of "$stall_task")"
+stall_adir="$stall_dir/attempts/attempt_001"
+# the provider recorded nothing for an hour
+jq -n --argjson t "$(( ($(date +%s) - 3600) * 1000 ))" '[{time_created: $t, type: "text"}]' \
+  >"$stall_adir/provider-progress.json"
+set +e
+res="$(run_delegate "$oc" wait "$stall_task" --poll-timeout 30 --stall-seconds 5)"
+code=$?
+set -e
+[ "$code" -eq 5 ] || fail "opencode: a stalled wait should exit 5, got $code: $res"
+echo "$res" | grep -q 'returned=stalled' || fail "opencode: stalled return is indistinguishable from a poll timeout: $res"
+
+# and it is return-only: the attempt is left running, never cancelled
+set +e
+res="$(run_delegate "$oc" status "$stall_task" --json)"
+set -e
+echo "$res" | jq -e '.task_state != "cancelled" and .outcome.transport != "cancelled"' >/dev/null \
+  || fail "opencode: a stalled wait must not cancel the attempt: $res"
+if grep -q 'attempt_cancelled' "$stall_dir/events.jsonl"; then
+  fail "opencode: a stalled wait recorded a cancellation"
+fi
+
+# --no-stall-return restores plain blocking, which is what `run` relies on
+set +e
+res="$(run_delegate "$oc" wait "$stall_task" --poll-timeout 2 --stall-seconds 5 --no-stall-return)"
+code=$?
+set -e
+[ "$code" -eq 3 ] || fail "opencode: --no-stall-return should poll out with 3, got $code"
+
+# a provider error in the stream also returns early
+echo '{"type":"error","sessionID":"ses_oc1","error":{"name":"APIError","data":{"statusCode":403}}}' \
+  >>"$stall_adir/raw.jsonl"
+set +e
+res="$(run_delegate "$oc" wait "$stall_task" --poll-timeout 30 --stall-seconds 99999)"
+code=$?
+set -e
+echo "$res" | grep -q 'returned=provider_error' || fail "opencode: provider error did not end the wait: $res"
+run_delegate "$oc" cancel "$stall_task" >/dev/null 2>&1 || true
+
 # --- legacy state ------------------------------------------------------------
 
 # pre-Task job directories are readable and clearly labelled, never reinterpreted

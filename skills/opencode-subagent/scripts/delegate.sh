@@ -33,11 +33,14 @@
 #   --label TEXT             name a verification run
 #   --timeout SECS           hard kill after SECS (default 1800)
 #   --poll-timeout SECS      how long `wait` blocks before reporting RUNNING
+#   --stall-seconds SECS     provider silence that ends a wait early (default 300)
+#   --no-stall-return        block for the full poll timeout even if it looks stalled
 #   --save-default           persist --model as the configured worker model
 #   --json                   machine-readable output
 #
 # Exit codes: 0 finished  1 verification failed  2 usage/config  3 still running
-#             4 incomplete turn (resume it)  124 timeout  127 missing CLI  130 cancelled
+#             4 incomplete turn (resume it)  5 still running but stalled
+#             124 timeout  127 missing CLI  130 cancelled
 #
 # Legacy forms still accepted: `delegate.sh [opts] "<task>"` and `delegate.sh --wait TASK`.
 set -euo pipefail
@@ -81,7 +84,11 @@ save_default=0
 wait_job=""
 poll_timeout=300
 poll_interval="${DELEGATE_POLL_INTERVAL:-5}"
-stall_threshold="${DELEGATE_STALL_THRESHOLD:-300}"
+stall_threshold="${DELEGATE_STALL_THRESHOLD:-}"
+stall_key="OPENCODE_SUBAGENT_STALL_SECONDS"
+default_stall_seconds=300
+no_stall_return=0
+wait_returned="poll_timeout"
 runner_attemptdir=""
 json_out=0
 reason=""
@@ -122,6 +129,8 @@ while [ "$#" -gt 0 ]; do
     --save-default) save_default=1 ;;
     --wait)         shift; wait_job="${1:?--wait requires a task id}" ;;
     --poll-timeout) shift; poll_timeout="${1:?--poll-timeout requires seconds}" ;;
+    --stall-seconds) shift; stall_threshold="${1:?--stall-seconds requires seconds}" ;;
+    --no-stall-return) no_stall_return=1 ;;
     --limit)        shift; limit="${1:?--limit requires a number}" ;;
     --active)       only_active=1 ;;
     --all)          only_active=0 ;;
@@ -158,6 +167,14 @@ conf_number() {
   case "$value" in
     ''|*[!0-9]*) echo "$2" ;;
     *) echo "$value" ;;
+  esac
+}
+
+# --stall-seconds wins, then the legacy env var, then the conf, then the default.
+# One variable, so `wait` and the liveness JSON can never disagree.
+resolve_stall_threshold() {
+  case "$stall_threshold" in
+    ''|*[!0-9]*) stall_threshold="$(conf_number "$stall_key" "$default_stall_seconds")" ;;
   esac
 }
 
@@ -576,11 +593,13 @@ attempt_running() {
 emit_status() {
   local code
   lock_acquire "$task_dir"
-  if [ "$json_out" -eq 1 ]; then json_status "$task_dir"; else
+  if [ "$json_out" -eq 1 ]; then json_status "$task_dir" | jq --arg why "$wait_returned" --argjson stall "${stall_threshold:-null}" \
+      '.wait_returned = $why | .stall_threshold_seconds = $stall'; else
     local adir
     if attempt_running "$task_dir"; then
       adir="$task_dir/attempts/$(json_read "$task_dir/task.json" '.current_attempt')"
-      attempt_liveness "$adir" | jq -r '"RUNNING (elapsed \(.elapsed_seconds)s, idle \(.idle_seconds // "?")s, alive=\(.process_alive), possibly_stalled=\(.possibly_stalled))"'
+      attempt_liveness "$adir" | jq -r --arg why "$wait_returned" \
+        '"RUNNING (elapsed \(.elapsed_seconds)s, idle \(.idle_seconds // "?")s, alive=\(.process_alive), possibly_stalled=\(.possibly_stalled), returned=\($why))"'
       render_status "$task_dir"
       print_watch "$adir"
     else
@@ -588,6 +607,9 @@ emit_status() {
     fi
   fi
   code="$(task_exit_code "$task_dir")"
+  # A stalled return must not look like an ordinary poll timeout: exit 3 tells
+  # the supervisor to poll again, which here would spin until the hard timeout.
+  if [ "$code" -eq 3 ] && [ "$wait_returned" = "stalled" ]; then code=5; fi
   lock_release
   exit "$code"
 }
@@ -597,10 +619,31 @@ do_status() {
   emit_status
 }
 
+# A provider error event in the stream. Read with grep, not jq: the last line of
+# a live stream is routinely half-written.
+attempt_stream_error() {
+  grep -q '"type":"error"' "$1/raw.jsonl" 2>/dev/null
+}
+
+# Blocking until there is something worth reporting: the attempt ended, the
+# provider went quiet for longer than the stall threshold, or the stream carried
+# an error. A long poll is only safe because it stops early on trouble.
 do_wait() {
   require_task "${positionals[0]:-$wait_job}" || legacy_emit
-  local end=$((SECONDS + poll_timeout))
+  local end=$((SECONDS + poll_timeout)) current adir idle
   while attempt_running "$task_dir"; do
+    # Re-resolve every pass: a concurrent retry can move the Task to a new
+    # attempt, and a cached directory would report a dead stream forever.
+    current="$(json_read "$task_dir/task.json" '.current_attempt')"
+    adir="$task_dir/attempts/$current"
+    if attempt_stream_error "$adir"; then wait_returned="provider_error"; break; fi
+    if [ "$no_stall_return" -eq 0 ]; then
+      idle="$(attempt_liveness "$adir" | jq -r '.idle_seconds // empty')"
+      case "$idle" in
+        ''|*[!0-9]*) ;;
+        *) if [ "$idle" -gt "$stall_threshold" ]; then wait_returned="stalled"; break; fi ;;
+      esac
+    fi
     if [ "$SECONDS" -ge "$end" ]; then break; fi
     sleep "$poll_interval"
   done
@@ -838,6 +881,8 @@ do_blocking_run() {
     echo "JOB: $task_id"
   fi
   poll_timeout=$((hard_timeout + 60))
+  # `run` promises to block until the attempt ends; only the hard timeout stops it.
+  no_stall_return=1
   positionals=("$task_id")
   wait_job="$task_id"
   do_wait
@@ -1172,6 +1217,9 @@ case "$op" in
     ;;
   start|run) spec="${positionals[0]:-}" ;;
 esac
+
+# One resolved value for every op, so `wait` and the liveness JSON agree.
+resolve_stall_threshold
 
 case "$op" in
   start)    do_start ;;
