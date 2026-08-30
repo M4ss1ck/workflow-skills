@@ -245,6 +245,8 @@ bash scripts/delegate.sh show TASK               # the whole story, in order
 bash scripts/delegate.sh logs TASK attempt_002 --stream request   # exactly what was asked
 ```
 
+A Task that finished and never got a decision stays in `awaiting_supervisor` indefinitely. `start`, `run`, `status` and `list` print a one-line note on stderr when this worktree has any, so a delegation you launched and walked away from surfaces on your next command instead of on nobody's.
+
 `recover` is safe to run at any time. It finds attempts whose runner and provider processes died without writing a result, records them as `interrupted`, folds in results that were written but never applied, and leaves everything else alone. A live provider remains `running` even if its detached runner disappeared. It never invents an outcome and never rewrites history.
 
 A detached attempt that finishes *after* you moved on cannot change the Task: it is recorded as `attempt_stale` and its own result is flagged `authoritative: false`.

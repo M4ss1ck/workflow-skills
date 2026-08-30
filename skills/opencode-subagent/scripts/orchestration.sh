@@ -139,6 +139,22 @@ worktree_key() {
   if [ -n "$top" ]; then printf '%s\n' "$top"; else (cd "$dir" && pwd -P); fi
 }
 
+# tasks_awaiting_in_tree KEY — Tasks in this tree that finished and never got a
+# decision. They sit in that state indefinitely; on this machine some have for
+# weeks, in repos nobody was looking at.
+tasks_awaiting_in_tree() {
+  local key="$1" d id tcwd
+  for d in "$state_root"/task_*/; do
+    [ -f "$d/task.json" ] || continue
+    [ "$(task_state "$d")" = "awaiting_supervisor" ] || continue
+    tcwd="$(json_read "$d/task.json" '.cwd')"
+    [ -n "$tcwd" ] || continue
+    [ "$(worktree_key "$tcwd")" = "$key" ] || continue
+    id="$(basename "$d")"
+    printf '%s\n' "$id"
+  done
+}
+
 # tasks_live_in_tree KEY [EXCLUDE_TASK_ID] — Tasks with a running attempt whose
 # working tree is KEY. The cheap state check comes first: resolving a worktree
 # for every Task on disk would cost one git call per historical Task.

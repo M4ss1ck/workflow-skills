@@ -1134,6 +1134,34 @@ set -e
 [ "$code" -eq 2 ] || fail "opencode: bare --any should exit 2, got $code: $msg"
 rm -rf "$live_dir"
 
+# --- stale-Task note --------------------------------------------------------
+
+# a Task that finished and never got a decision is invisible until someone goes
+# looking; say so, but only for the tree in front of us, and only on stderr
+note_repo="$stub_dir/work-note"
+other_repo="$stub_dir/work-note-other"
+mkdir -p "$note_repo" "$other_repo"
+git -C "$note_repo" init -q
+git -C "$other_repo" init -q
+note_task="$(cd "$note_repo" && run_delegate "$oc" run --json "undecided task" | jq -r .task_id)"
+
+err="$(cd "$note_repo" && run_delegate "$oc" list 2>&1 >/dev/null)"
+echo "$err" | grep -q "$note_task" || fail "opencode: no note about the undecided Task in its own tree: $err"
+echo "$err" | grep -q '^NOTE: 1 Task' || fail "opencode: the note miscounts pending Tasks: $err"
+
+# a different tree must not be nagged about it
+err="$(cd "$other_repo" && run_delegate "$oc" list 2>&1 >/dev/null)"
+echo "$err" | grep -q "$note_task" && fail "opencode: undecided Task leaked into another tree's note: $err"
+
+# and a launch's --json stdout stays parseable while the note is printed
+out="$(cd "$note_repo" && run_delegate "$oc" run --json "another task" 2>/dev/null)"
+echo "$out" | jq -e '.task_id' >/dev/null || fail "opencode: the note broke --json output: $out"
+
+# once decided, it stops being mentioned
+run_delegate "$oc" decide "$note_task" accept --reason "done" >/dev/null
+err="$(cd "$note_repo" && run_delegate "$oc" list 2>&1 >/dev/null)"
+echo "$err" | grep -q "$note_task" && fail "opencode: a decided Task is still reported as pending: $err"
+
 # --- legacy state ------------------------------------------------------------
 
 # pre-Task job directories are readable and clearly labelled, never reinterpreted

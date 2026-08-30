@@ -643,6 +643,7 @@ emit_status() {
 
 do_status() {
   require_task "${positionals[0]:-$wait_job}" || legacy_emit
+  note_awaiting_tasks
   emit_status
 }
 
@@ -833,6 +834,17 @@ warn_shared_tree() {
   echo "NOTE: another delegation is live in this worktree ($others); changed_files cannot tell the two apart — compare worker_attributed_files" >&2
 }
 
+# A Task that finished and never got a decision is invisible until someone goes
+# looking. Say so on stderr, scoped to this tree, so it cannot break --json and
+# cannot nag about unrelated repos.
+note_awaiting_tasks() {
+  local pending count
+  pending="$(tasks_awaiting_in_tree "$(worktree_key "${cwd:-$PWD}")" | paste -sd, - || true)"
+  [ -n "$pending" ] || return 0
+  count="$(printf '%s\n' "$pending" | tr ',' '\n' | wc -l | tr -d ' ')"
+  echo "NOTE: $count Task(s) in this worktree await your decision: $pending" >&2
+}
+
 do_launch() {
   [ -n "$spec" ] || die "missing task spec"
   preflight
@@ -845,6 +857,7 @@ do_launch() {
   done
 
   warn_shared_tree "$task_id"
+  note_awaiting_tasks
 
   lock_acquire "$task_dir"
   task_create "$task_dir" "$task_id" "${cwd:-$PWD}" "$model" "$hard_timeout" "$(task_title "$spec")"
@@ -1132,6 +1145,7 @@ do_decide() {
 # ------------------------------------------------------------------ inspection
 
 do_list() {
+  note_awaiting_tasks
   local d rows
   rows="$(
     for d in "$state_root"/task_*/; do
