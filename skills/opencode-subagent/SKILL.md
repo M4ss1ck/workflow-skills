@@ -164,6 +164,8 @@ bash scripts/delegate.sh resume SESSION "Use write-through caching."
 
 Answer it and resume the same session. Do not re-delegate the same ambiguity.
 
+With several Tasks in flight, poll them together: `wait --any TASK1 TASK2` returns one table and exits `0` as soon as any of them is terminal, `3` while all are still running. Those codes are the aggregate only — each Task's own state, worker outcome and exit code are columns in the table, and `--json` returns one object per Task.
+
 **Concurrent delegations are allowed.** Nothing serializes them: several Tasks may run at once, in one worktree or across several. Two well-scoped tasks in one tree do not fight over files, but the launch-to-finish tree diff cannot tell their edits apart, so the wrapper says so on stderr at launch and you review `worker_attributed_files` instead of `changed_files`.
 
 ## Operations
@@ -175,6 +177,7 @@ bash scripts/delegate.sh retry  TASK --reason R "<fix>"# next Attempt, same sess
 bash scripts/delegate.sh resume SESSION "<fix>"        # next Attempt on the Task owning SESSION
 bash scripts/delegate.sh status TASK                   # state + liveness, no blocking
 bash scripts/delegate.sh wait   TASK [--poll-timeout SECS]
+bash scripts/delegate.sh wait   --any TASK [TASK...]    # one table for several Tasks
 bash scripts/delegate.sh verify TASK [--label L] -- CMD ARGS...
 bash scripts/delegate.sh decide TASK DECISION --reason R
 bash scripts/delegate.sh cancel TASK [--keep-task]     # stop the running Attempt

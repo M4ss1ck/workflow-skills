@@ -12,6 +12,7 @@
 # Supervising:
 #   delegate.sh status TASK                     current state, no blocking
 #   delegate.sh wait   TASK [--poll-timeout S]
+#   delegate.sh wait   --any TASK [TASK...]      table; 0 if any is terminal, 3 if none
 #   delegate.sh verify TASK [--label L] -- CMD  run + record independent verification
 #   delegate.sh decide TASK DECISION --reason R accept|retry|reject|cancel|take_over|continue_waiting
 #
@@ -88,6 +89,7 @@ stall_threshold="${DELEGATE_STALL_THRESHOLD:-}"
 stall_key="OPENCODE_SUBAGENT_STALL_SECONDS"
 default_stall_seconds=300
 no_stall_return=0
+wait_any=0
 wait_returned="poll_timeout"
 runner_attemptdir=""
 json_out=0
@@ -131,6 +133,7 @@ while [ "$#" -gt 0 ]; do
     --poll-timeout) shift; poll_timeout="${1:?--poll-timeout requires seconds}" ;;
     --stall-seconds) shift; stall_threshold="${1:?--stall-seconds requires seconds}" ;;
     --no-stall-return) no_stall_return=1 ;;
+    --any)          wait_any=1 ;;
     --limit)        shift; limit="${1:?--limit requires a number}" ;;
     --active)       only_active=1 ;;
     --all)          only_active=0 ;;
@@ -649,10 +652,47 @@ attempt_stream_error() {
   grep -q '"type":"error"' "$1/raw.jsonl" 2>/dev/null
 }
 
+# One row per Task, so a supervisor watching several does not poll each in turn.
+# The process exit answers only "is there anything to look at yet"; the per-Task
+# disposition is in the table, because several Tasks have no single exit code.
+do_wait_any() {
+  local ids=("${positionals[@]}") id dir any=0 line
+  [ "${#ids[@]}" -gt 0 ] || die "wait --any requires at least one task id"
+  for id in "${ids[@]}"; do
+    task_exists "$id" || die "unknown task: $id (see: delegate.sh list)"
+  done
+  local end=$((SECONDS + poll_timeout))
+  while :; do
+    any=0
+    for id in "${ids[@]}"; do
+      attempt_running "$state_root/$id" || { any=1; break; }
+    done
+    [ "$any" -eq 0 ] || break
+    [ "$SECONDS" -lt "$end" ] || break
+    sleep "$poll_interval"
+  done
+
+  if [ "$json_out" -eq 1 ]; then
+    { for id in "${ids[@]}"; do json_status "$state_root/$id"; done; } | jq -s .
+  else
+    printf '%-34s %-20s %-10s %-6s %8s %8s\n' TASK STATE WORKER EXIT ELAPSED IDLE
+    for id in "${ids[@]}"; do
+      dir="$state_root/$id"
+      line="$(json_status "$dir" | jq -r '[.task_id, .task_state, (.outcome.worker // "-"),
+              ((.exit_code // "-")|tostring), ((.elapsed_seconds // 0)|tostring),
+              ((.liveness.idle_seconds // "-")|tostring)] | @tsv')"
+      printf '%-34s %-20s %-10s %-6s %8s %8s\n' $line
+    done
+  fi
+  [ "$any" -eq 1 ] && exit 0
+  exit 3
+}
+
 # Blocking until there is something worth reporting: the attempt ended, the
 # provider went quiet for longer than the stall threshold, or the stream carried
 # an error. A long poll is only safe because it stops early on trouble.
 do_wait() {
+  [ "$wait_any" -eq 0 ] || do_wait_any
   require_task "${positionals[0]:-$wait_job}" || legacy_emit
   local end=$((SECONDS + poll_timeout)) current adir idle
   while attempt_running "$task_dir"; do
@@ -1234,6 +1274,11 @@ if [ -n "$runner_attemptdir" ]; then
   do_run
   exit 0
 fi
+
+# Without this, `delegate.sh --any T1 T2` would fall through to a launch and
+# start a delegation whose task text is a task id.
+[ "$wait_any" -eq 0 ] || [ "$op" = "wait" ] || [ -n "$wait_job" ] \
+  || die "--any applies to wait: delegate.sh wait --any TASK [TASK...]"
 
 case "$op" in
   "")

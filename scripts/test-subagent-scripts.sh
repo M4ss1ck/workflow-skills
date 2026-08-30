@@ -1082,6 +1082,58 @@ set -e
 echo "$res" | grep -q 'returned=provider_error' || fail "opencode: provider error did not end the wait: $res"
 run_delegate "$oc" cancel "$stall_task" >/dev/null 2>&1 || true
 
+# --- wait --any -------------------------------------------------------------
+
+any_repo="$stub_dir/work-any"
+mkdir -p "$any_repo"
+git -C "$any_repo" init -q
+done_a="$(cd "$any_repo" && run_delegate "$oc" run --json "any task a" | jq -r .task_id)"
+
+# a live Task, planted so the table has one of each
+live_task="task_any_live"
+live_dir="$(taskdir_of "$live_task")"
+mkdir -p "$live_dir/attempts/attempt_001"
+jq -n --arg cwd "$any_repo" '{schema: 2, task_id: "task_any_live", state: "running", cwd: $cwd,
+    current_attempt: "attempt_001", attempt_count: 1}' >"$live_dir/task.json"
+jq -n --argjson t "$(date +%s)" '{started_epoch: $t, kind: "initial"}' \
+  >"$live_dir/attempts/attempt_001/meta.json"
+
+# one terminal Task among them means there is something to look at: exit 0
+set +e
+res="$(run_delegate "$oc" wait --any "$done_a" "$live_task" --poll-timeout 1)"
+code=$?
+set -e
+[ "$code" -eq 0 ] || fail "opencode: wait --any with a finished task should exit 0, got $code: $res"
+echo "$res" | grep -q "$done_a" || fail "opencode: wait --any table omits a task: $res"
+echo "$res" | grep -q "$live_task" || fail "opencode: wait --any table omits the running task: $res"
+
+# all still running: exit 3
+set +e
+res="$(run_delegate "$oc" wait --any "$live_task" --poll-timeout 1)"
+code=$?
+set -e
+[ "$code" -eq 3 ] || fail "opencode: wait --any with nothing terminal should exit 3, got $code"
+
+# --json returns one object per task
+res="$(run_delegate "$oc" wait --any "$done_a" "$live_task" --poll-timeout 1 --json)"
+echo "$res" | jq -e 'length == 2 and (.[0] | has("task_id"))' >/dev/null \
+  || fail "opencode: wait --any --json is not one object per task: $res"
+
+# an unknown id is an error, not a silently short table
+set +e
+run_delegate "$oc" wait --any "$done_a" task_does_not_exist >/dev/null 2>&1
+code=$?
+set -e
+[ "$code" -eq 2 ] || fail "opencode: wait --any with an unknown task should exit 2, got $code"
+
+# --any without wait must not fall through to a launch
+set +e
+msg="$(run_delegate "$oc" --any "$done_a" 2>&1)"
+code=$?
+set -e
+[ "$code" -eq 2 ] || fail "opencode: bare --any should exit 2, got $code: $msg"
+rm -rf "$live_dir"
+
 # --- legacy state ------------------------------------------------------------
 
 # pre-Task job directories are readable and clearly labelled, never reinterpreted
