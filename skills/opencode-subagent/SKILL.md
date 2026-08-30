@@ -10,6 +10,10 @@ You are the **supervisor**. `opencode run` is a **worker**. This skill is the tr
 
 The savings come from context isolation (the worker's read/edit/test loop never enters your context) and price arbitrage (the worker runs a cheap model). Both are lost if the task is under-specified.
 
+## Invoking it
+
+`opencode-delegate` is on PATH once `scripts/install.sh` has run. If it is not (a host where the skill was copied rather than installed), call the script directly: `bash <this skill dir>/scripts/delegate.sh` — every command below is otherwise identical.
+
 ## Division of responsibility
 
 | Supervisor (you) owns | Worker owns |
@@ -85,7 +89,7 @@ delegate → inspect → wait → interpret the worker outcome → verify indepe
    → accept  OR  record a correction and retry  OR  take over
 ```
 
-1. **Check the policy** when considering delegation the user did not request: `bash scripts/delegate.sh policy`. If `explicit` or `off`, do the work yourself.
+1. **Check the policy** when considering delegation the user did not request: `opencode-delegate policy`. If `explicit` or `off`, do the work yourself.
 
 2. **Write the job packet.** Task-specific facts only — the worker's standing rules (no redesign, no further delegation, no commits, report format) live in its agent definition.
 
@@ -112,14 +116,16 @@ delegate → inspect → wait → interpret the worker outcome → verify indepe
 3. **Launch.** Blocking when you cannot proceed without the result, async when you have other work:
 
    ```bash
-   bash scripts/delegate.sh run   [opts] "<job packet>"    # blocks
-   bash scripts/delegate.sh start [opts] "<job packet>"    # returns a TASK id at once
-   bash scripts/delegate.sh wait  TASK --poll-timeout 300
+   opencode-delegate run   [opts] "<job packet>"    # blocks
+   opencode-delegate start [opts] "<job packet>"    # returns a TASK id at once
+   opencode-delegate wait  TASK --poll-timeout 300
    ```
 
    If the user named a model, pass it exactly via `--model provider/model` — never substitute or "upgrade" their choice — and add `--save-default` the first time so it becomes the configured worker model (tell them it is saved).
 
    `wait` blocks until there is something worth reporting: the attempt ends, the provider goes quiet for longer than `--stall-seconds` (default 300), or the stream carries a provider error. A long `--poll-timeout` is safe because of that.
+
+   With several Tasks in flight, poll them together: `wait --any TASK1 TASK2` returns one table and exits `0` as soon as any is terminal, `3` while all are still running. Those codes are the aggregate only — each Task's state, worker outcome and exit code are columns in the table, and `--json` returns one object per Task.
 
    Set your shell tool's own timeout above `--poll-timeout`. Exit 3 means still running: poll again, or check without blocking via `status TASK`. **Exit 5 means still running but silent** — the worker has recorded nothing for the stall window. Decide: keep waiting, inspect the stream, or cancel. Do not immediately re-wait, which would spin until the hard timeout. Silence is not proof of a hang: a worker running one long command looks identical, so nothing is ever cancelled for it. Never abandon a running task silently.
 
@@ -137,7 +143,7 @@ delegate → inspect → wait → interpret the worker outcome → verify indepe
 5. **Verify independently.** Read the diff of `changed_files`, then run the acceptance command *yourself* through the recorder:
 
    ```bash
-   bash scripts/delegate.sh verify TASK -- pnpm test foo
+   opencode-delegate verify TASK -- pnpm test foo
    ```
 
    Exit 0 = passed, 1 = the command ran and failed, 2 = the command could not be executed; every result stores the command, cwd, timings, exit code and output on the Task. Verification is refused while any attempt is running in the same worktree — this Task's or another's — because a result measured mid-edit means nothing. A worker claiming its tests pass is not verification.
@@ -145,9 +151,9 @@ delegate → inspect → wait → interpret the worker outcome → verify indepe
 6. **Accept, correct, or take over.**
 
    ```bash
-   bash scripts/delegate.sh decide TASK accept --reason "diff matches the spec; pnpm test foo passes"
-   bash scripts/delegate.sh retry  TASK --reason "typecheck still fails in src/foo.ts" "fix: <narrow correction>"
-   bash scripts/delegate.sh decide TASK take_over --reason "two failed resumes; finishing in-context"
+   opencode-delegate decide TASK accept --reason "diff matches the spec; pnpm test foo passes"
+   opencode-delegate retry  TASK --reason "typecheck still fails in src/foo.ts" "fix: <narrow correction>"
+   opencode-delegate decide TASK take_over --reason "two failed resumes; finishing in-context"
    ```
 
    `retry` creates the next Attempt on the same Task, links it with `retry_of`, and reuses the same OpenCode session by default (`--new-session` to abandon it). **After two failed corrections, take the task over in-context** rather than retrying a third time.
@@ -157,37 +163,35 @@ delegate → inspect → wait → interpret the worker outcome → verify indepe
 The worker must not invent architectural or product decisions. When it stops with `STATUS: BLOCKED`, the attempt ends cleanly and the Task moves to `supervisor: decision_required`.
 
 ```bash
-bash scripts/delegate.sh show   TASK --json | jq -r '.attempts[-1].worker_question'
-bash scripts/delegate.sh decide TASK retry --reason "write-through; the cache must survive a crash"
-bash scripts/delegate.sh resume SESSION "Use write-through caching."
+opencode-delegate show   TASK --json | jq -r '.attempts[-1].worker_question'
+opencode-delegate decide TASK retry --reason "write-through; the cache must survive a crash"
+opencode-delegate resume SESSION "Use write-through caching."
 ```
 
 Answer it and resume the same session. Do not re-delegate the same ambiguity.
-
-With several Tasks in flight, poll them together: `wait --any TASK1 TASK2` returns one table and exits `0` as soon as any of them is terminal, `3` while all are still running. Those codes are the aggregate only — each Task's own state, worker outcome and exit code are columns in the table, and `--json` returns one object per Task.
 
 **Concurrent delegations are allowed.** Nothing serializes them: several Tasks may run at once, in one worktree or across several. Two well-scoped tasks in one tree do not fight over files, but the launch-to-finish tree diff cannot tell their edits apart, so the wrapper says so on stderr at launch and you review `worker_attributed_files` instead of `changed_files`.
 
 ## Operations
 
 ```bash
-bash scripts/delegate.sh start  [opts] "<task>"        # launch Attempt 1 detached
-bash scripts/delegate.sh run    [opts] "<task>"        # launch and block
-bash scripts/delegate.sh retry  TASK --reason R "<fix>"# next Attempt, same session by default
-bash scripts/delegate.sh resume SESSION "<fix>"        # next Attempt on the Task owning SESSION
-bash scripts/delegate.sh status TASK                   # state + liveness, no blocking
-bash scripts/delegate.sh wait   TASK [--poll-timeout SECS]
-bash scripts/delegate.sh wait   --any TASK [TASK...]    # one table for several Tasks
-bash scripts/delegate.sh verify TASK [--label L] -- CMD ARGS...
-bash scripts/delegate.sh decide TASK DECISION --reason R
-bash scripts/delegate.sh cancel TASK [--keep-task]     # stop the running Attempt
-bash scripts/delegate.sh list   [--active] [--limit N]
-bash scripts/delegate.sh show   TASK                   # task + attempts + verifications + history
-bash scripts/delegate.sh attempts TASK
-bash scripts/delegate.sh events TASK
-bash scripts/delegate.sh logs   TASK [ATTEMPT] [--stream report|request|raw|stderr|progress|result|meta|changed]
-bash scripts/delegate.sh recover                       # reconcile state after a crash
-bash scripts/delegate.sh policy [off|explicit|auto]
+opencode-delegate start  [opts] "<task>"        # launch Attempt 1 detached
+opencode-delegate run    [opts] "<task>"        # launch and block
+opencode-delegate retry  TASK --reason R "<fix>"# next Attempt, same session by default
+opencode-delegate resume SESSION "<fix>"        # next Attempt on the Task owning SESSION
+opencode-delegate status TASK                   # state + liveness, no blocking
+opencode-delegate wait   TASK [--poll-timeout SECS]
+opencode-delegate wait   --any TASK [TASK...]    # one table for several Tasks
+opencode-delegate verify TASK [--label L] -- CMD ARGS...
+opencode-delegate decide TASK DECISION --reason R
+opencode-delegate cancel TASK [--keep-task]     # stop the running Attempt
+opencode-delegate list   [--active] [--limit N]
+opencode-delegate show   TASK                   # task + attempts + verifications + history
+opencode-delegate attempts TASK
+opencode-delegate events TASK
+opencode-delegate logs   TASK [ATTEMPT] [--stream report|request|raw|stderr|progress|result|meta|changed]
+opencode-delegate recover                       # reconcile state after a crash
+opencode-delegate policy [off|explicit|auto]
 ```
 
 Decisions: `accept` · `retry` · `reject` · `cancel` · `take_over` · `continue_waiting`. `--reason` is required for `retry`, `reject` and `take_over` — the reason is the durable record of why.
@@ -241,10 +245,10 @@ Add `--json` to any operation. `status`/`wait`/`start`/`run` return the flat vie
 Nothing important lives only in your conversation. A fresh supervisor with no context can pick up any Task:
 
 ```bash
-bash scripts/delegate.sh recover --json          # reconcile crashed/interrupted attempts first
-bash scripts/delegate.sh list --active --json    # what is still open
-bash scripts/delegate.sh show TASK               # the whole story, in order
-bash scripts/delegate.sh logs TASK attempt_002 --stream request   # exactly what was asked
+opencode-delegate recover --json          # reconcile crashed/interrupted attempts first
+opencode-delegate list --active --json    # what is still open
+opencode-delegate show TASK               # the whole story, in order
+opencode-delegate logs TASK attempt_002 --stream request   # exactly what was asked
 ```
 
 A Task that finished and never got a decision stays in `awaiting_supervisor` indefinitely. `start`, `run`, `status` and `list` print a one-line note on stderr when this worktree has any, so a delegation you launched and walked away from surfaces on your next command instead of on nobody's.
