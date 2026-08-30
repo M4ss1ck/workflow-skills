@@ -868,6 +868,13 @@ do_verify() {
     cmdline="${positionals[1]:-}"
   fi
   [ -n "$cmdline" ] || die "verify requires a command: delegate.sh verify TASK -- pnpm test"
+  # A result measured while anything is still editing the tree means nothing —
+  # this Task's own worker, or another Task's now that delegations run in
+  # parallel.
+  local siblings
+  siblings="$(tasks_live_in_tree "$(worktree_key "$(json_read "$task_dir/task.json" '.cwd')")" "$task_id" | paste -sd, - || true)"
+  [ -z "$siblings" ] \
+    || die "another delegation is still editing this worktree ($siblings); verification must run outside every worker's turn"
   lock_acquire "$task_dir"
   ! attempt_running "$task_dir" \
     || die "attempt $(json_read "$task_dir/task.json" '.current_attempt') is still running; verification must run outside the worker's turn"

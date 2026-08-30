@@ -138,7 +138,7 @@ delegate → inspect → wait → interpret the worker outcome → verify indepe
    bash scripts/delegate.sh verify TASK -- pnpm test foo
    ```
 
-   Exit 0 = passed, 1 = the command ran and failed, 2 = the command could not be executed; every result stores the command, cwd, timings, exit code and output on the Task. Verification is refused while an attempt is running, because a result measured mid-edit means nothing. A worker claiming its tests pass is not verification.
+   Exit 0 = passed, 1 = the command ran and failed, 2 = the command could not be executed; every result stores the command, cwd, timings, exit code and output on the Task. Verification is refused while any attempt is running in the same worktree — this Task's or another's — because a result measured mid-edit means nothing. A worker claiming its tests pass is not verification.
 
 6. **Accept, correct, or take over.**
 

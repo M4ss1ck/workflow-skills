@@ -997,6 +997,37 @@ res="$(cd "$prose_repo" && STUB_FILES='- Stage 1 core domain files' \
 echo "$res" | jq -e '(.changed_files | length) > 0 and (.worker_attributed_files | length) == 0' >/dev/null \
   || fail "opencode: prose FILES_CHANGED must attribute nothing yet keep the diff: $res"
 
+# a sibling delegation still editing the same tree also blocks verification:
+# the one-per-worktree rule used to guarantee this implicitly
+sib_repo="$stub_dir/work-sibling"
+mkdir -p "$sib_repo"
+git -C "$sib_repo" init -q
+done_out="$(cd "$sib_repo" && run_delegate "$oc" run --json "quick task")"
+done_task="$(echo "$done_out" | jq -r .task_id)"
+
+# a live sibling, planted rather than raced: a Task in the same tree whose
+# current attempt has not written a result
+sib_task="task_sibling_live"
+sib_dir="$(taskdir_of "$sib_task")"
+mkdir -p "$sib_dir/attempts/attempt_001"
+jq -n --arg cwd "$sib_repo" \
+  '{schema: 2, task_id: "task_sibling_live", state: "running", cwd: $cwd,
+    current_attempt: "attempt_001", attempt_count: 1}' >"$sib_dir/task.json"
+
+set +e
+msg="$(cd "$sib_repo" && run_delegate "$oc" verify "$done_task" -- true 2>&1)"
+code=$?
+set -e
+[ "$code" -eq 2 ] || fail "opencode: verify with a live sibling in the tree should exit 2, got $code"
+echo "$msg" | grep -q "$sib_task" || fail "opencode: verify refusal must name the blocking Task: $msg"
+
+# a live Task in a DIFFERENT tree must not block it
+jq -n '{schema: 2, task_id: "task_sibling_live", state: "running", cwd: "/nonexistent/other/tree",
+        current_attempt: "attempt_001", attempt_count: 1}' >"$sib_dir/task.json"
+(cd "$sib_repo" && run_delegate "$oc" verify "$done_task" -- true) >/dev/null \
+  || fail "opencode: a live Task in another tree must not block verification"
+rm -rf "$sib_dir"
+
 # --- legacy state ------------------------------------------------------------
 
 # pre-Task job directories are readable and clearly labelled, never reinterpreted
