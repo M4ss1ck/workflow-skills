@@ -590,6 +590,27 @@ attempt_running() {
 
 # ------------------------------------------------------------------ operations
 
+# The most recent thing the worker actually did, for the one-line RUNNING
+# report. Prefers the provider's own rows; falls back to the CLI stream.
+attempt_partial_cost() {
+  jq -rs '[.[] | select(.type? == "step_finish") | .part.cost? // empty]
+          | if length == 0 then empty else add end' "$1/raw.jsonl" 2>/dev/null || true
+}
+
+attempt_activity() {
+  local dir="$1" act=""
+  act="$(jq -r 'map(select((.text // .tool) != null)) | .[0]
+                | if . == null then empty
+                  elif .tool then "tool " + .tool + (if .status then " (" + .status + ")" else "" end)
+                  else (.text | gsub("\\s+"; " ")) end' \
+        "$dir/provider-progress.json" 2>/dev/null || true)"
+  if [ -z "$act" ]; then
+    act="$(grep -o '"text":"[^"]*"' "$dir/raw.jsonl" 2>/dev/null | tail -1 | cut -c9- | tr -d '"' || true)"
+  fi
+  [ -n "$act" ] || return 0
+  printf '%.200s' "$act"
+}
+
 emit_status() {
   local code
   lock_acquire "$task_dir"
@@ -598,10 +619,13 @@ emit_status() {
     local adir
     if attempt_running "$task_dir"; then
       adir="$task_dir/attempts/$(json_read "$task_dir/task.json" '.current_attempt')"
-      attempt_liveness "$adir" | jq -r --arg why "$wait_returned" \
-        '"RUNNING (elapsed \(.elapsed_seconds)s, idle \(.idle_seconds // "?")s, alive=\(.process_alive), possibly_stalled=\(.possibly_stalled), returned=\($why))"'
+      attempt_liveness "$adir" | jq -r \
+        --arg why "$wait_returned" \
+        --arg act "$(attempt_activity "$adir")" \
+        --arg cost "$(attempt_partial_cost "$adir")" \
+        '"RUNNING (elapsed \(.elapsed_seconds)s, idle \(.idle_seconds // "?")s, alive=\(.process_alive), possibly_stalled=\(.possibly_stalled), returned=\($why)\(if $cost == "" then "" else ", cost $" + $cost end))"
+         + (if $act == "" then "" else "\nLAST: " + $act end)'
       render_status "$task_dir"
-      print_watch "$adir"
     else
       render_status "$task_dir"
     fi

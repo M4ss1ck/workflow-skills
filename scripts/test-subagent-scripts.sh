@@ -621,7 +621,10 @@ set -e
 [ "$code" -eq 3 ] || fail "opencode: running wait should exit 3, got $code"
 echo "$res" | grep -q '^RUNNING' || fail "opencode: no RUNNING line: $res"
 echo "$res" | grep -q 'possibly_stalled=false' || fail "opencode: no liveness in RUNNING line: $res"
-echo "$res" | grep -q '^WATCH:' || fail "opencode: running wait should reprint WATCH: $res"
+# a poll reports progress in one line; the six-line watch block belongs to the
+# launch that printed it once, not to every poll
+echo "$res" | grep -q '^WATCH:' && fail "opencode: a poll must not reprint the watch block: $res"
+echo "$res" | grep -qE '^RUNNING .*returned=' || fail "opencode: RUNNING line lost its return reason: $res"
 set +e
 res="$(run_delegate "$oc" status "$task" --json)"
 set -e
