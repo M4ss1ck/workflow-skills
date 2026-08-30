@@ -864,8 +864,34 @@ json_status() {
 
 # render_status TASKDIR — human output. Keeps the SESSION/COST/EXIT/--- REPORT ---
 # shape the pre-Task versions printed, so existing eyeballs and greps still work.
+# The worker's structured block is parsed into result.json already, so render
+# those fields rather than tailing the raw text: a long CONCERNS list would
+# otherwise push QUESTION out of the tail, and a fallback report is not the
+# block at all but raw provider JSONL.
 render_status() {
-  json_status "$1" | jq -r '
+  json_status "$1" | jq -r --argjson full "${report_full:-0}" '
+    def report_view:
+      if $full == 1 then (.report // "(no worker report)")
+      elif (.attempt.worker_question // null) != null or (.attempt.worker_verification // null) != null
+           or (.attempt.worker_concerns // null) != null then
+        ([ (if (.attempt.worker_verification // null) != null then "VERIFICATION: " + .attempt.worker_verification else empty end),
+           (if (.attempt.worker_question // null) != null then "QUESTION: " + .attempt.worker_question else empty end),
+           (if (.attempt.worker_concerns // null) != null then "CONCERNS: " + .attempt.worker_concerns else empty end)
+         ] | join("\n"))
+        + "\n(full report: logs TASK --stream report)"
+      else
+        # Two caps: a fallback report is raw provider JSONL, where a handful of
+        # lines can still be tens of kilobytes.
+        ((.report // "(no worker report)") | split("\n")) as $lines
+        | (if ($lines | length) <= 20 then ($lines | join("\n"))
+           else "… (\(($lines | length) - 20) earlier lines elided; --full or logs TASK --stream report)\n"
+                + ($lines[-20:] | join("\n")) end) as $view
+        | if ($view | length) > 2000
+          then "… (truncated to the last 2000 characters; --full or logs TASK --stream report)\n"
+               + ($view[-2000:])
+          else $view end
+      end;
+
     "TASK: \(.task_id)",
     "TITLE: \(.title // "-")",
     "ATTEMPT: \(.attempt_id // "-") (\(.attempt.kind // "-")\(if .attempt.retry_of then ", retry of \(.attempt.retry_of)" else "" end))",
@@ -879,6 +905,11 @@ render_status() {
     "SUPERVISOR: \(.outcome.supervisor)",
     (if .failure_class then "FAILURE: \(.failure_class)" else empty end),
     "NEXT: \(.recommended_action)",
+    (if (.changed_files // []) | length > 0 then
+       "FILES: \((.worker_attributed_files // []) | join(", "))"
+       + (if (.unattributed_files // []) | length > 0
+          then " | unattributed: \((.unattributed_files) | join(", "))" else "" end)
+     else empty end),
     "--- REPORT ---",
-    (.report // "(no worker report)")'
+    report_view'
 }

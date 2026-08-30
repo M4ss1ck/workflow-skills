@@ -192,7 +192,9 @@ bash scripts/delegate.sh policy [off|explicit|auto]
 
 Decisions: `accept` · `retry` · `reject` · `cancel` · `take_over` · `continue_waiting`. `--reason` is required for `retry`, `reject` and `take_over` — the reason is the durable record of why.
 
-Options: `--model provider/model`, `--cwd DIR`, `--resume SESSION_ID`, `--new-session`, `--reason TEXT`, `--label TEXT`, `--timeout SECS` (default 1800), `--poll-timeout SECS`, `--stall-seconds SECS` (default 300), `--no-stall-return`, `--save-default`, `--json`.
+`status` and `wait` render the worker's parsed report — its verification, question and concerns — rather than the raw text, and cap a fallback report that is really provider JSONL. `--full` prints it verbatim; `--json` is never truncated.
+
+Options: `--model provider/model`, `--cwd DIR`, `--resume SESSION_ID`, `--new-session`, `--reason TEXT`, `--label TEXT`, `--timeout SECS` (default 1800), `--poll-timeout SECS`, `--stall-seconds SECS` (default 300), `--no-stall-return`, `--full`, `--save-default`, `--json`.
 
 Exit codes: `0` finished · `1` verification failed · `2` usage/config or verification-execution error · `3` still running · `4` incomplete turn, resume the session · `5` still running but stalled · `124` timeout · `127` missing CLI · `130` cancelled.
 

@@ -847,7 +847,10 @@ out="$(STUB_DB_FAIL=1 run_delegate "$oc" "db fallback")"
 task="$(task_of "$out")"
 res="$(run_delegate "$oc" --wait "$task" --poll-timeout 30)"
 echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: DB failure replaced successful CLI exit: $res"
-echo "$res" | grep -q 'STATUS: DONE' || fail "opencode: DB failure lost CLI report: $res"
+# the report survived and was parsed: its status became the worker outcome and
+# its VERIFICATION text is rendered
+echo "$res" | grep -q '^WORKER: done$' || fail "opencode: DB failure lost the CLI report's status: $res"
+echo "$res" | grep -q 'stub check -> pass' || fail "opencode: DB failure lost the CLI report body: $res"
 jq -e '.outcome.transport == "finished"' "$(taskdir_of "$task")/task.json" >/dev/null \
   || fail "opencode: DB failure stranded running status"
 
@@ -932,7 +935,8 @@ echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: status of a finished task l
 res="$(run_delegate "$oc" run --model blocking/model "blocking task")"
 echo "$res" | grep -q '^TASK: task_' || fail "opencode: run did not report its task id: $res"
 echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: run did not block through completion: $res"
-echo "$res" | grep -q 'STATUS: DONE' || fail "opencode: run lost the report: $res"
+echo "$res" | grep -q '^WORKER: done$' || fail "opencode: run lost the report: $res"
+echo "$res" | grep -q 'stub check -> pass' || fail "opencode: run lost the report body: $res"
 grep -q -- '--model blocking/model' "$stub_dir/opencode.args" || fail "opencode: run dropped --model"
 
 # `retry --new-session` deliberately abandons the session
@@ -1161,6 +1165,48 @@ echo "$out" | jq -e '.task_id' >/dev/null || fail "opencode: the note broke --js
 run_delegate "$oc" decide "$note_task" accept --reason "done" >/dev/null
 err="$(cd "$note_repo" && run_delegate "$oc" list 2>&1 >/dev/null)"
 echo "$err" | grep -q "$note_task" && fail "opencode: a decided Task is still reported as pending: $err"
+
+# --- report rendering -------------------------------------------------------
+
+# a BLOCKED worker's question must survive rendering. Tailing the raw report
+# would hide it behind a long CONCERNS list, since QUESTION is second to last.
+blocked_task="$(STUB_STATUS=BLOCKED run_delegate "$oc" run --json "blocking task" | jq -r .task_id)"
+set +e
+res="$(run_delegate "$oc" status "$blocked_task")"
+set -e
+echo "$res" | grep -q 'QUESTION: ' || fail "opencode: the worker's question is not rendered: $res"
+run_delegate "$oc" decide "$blocked_task" accept --reason "fixture" >/dev/null
+
+# --full restores the report verbatim
+set +e
+res="$(run_delegate "$oc" status "$blocked_task" --full)"
+set -e
+echo "$res" | grep -q 'STATUS: BLOCKED' || fail "opencode: --full did not restore the raw report: $res"
+
+# a fallback report is raw provider JSONL: a handful of lines, tens of
+# kilobytes. A line-count cap alone would print all of it.
+long_task="$(run_delegate "$oc" run --json "long report task" | jq -r .task_id)"
+long_res="$(taskdir_of "$long_task")/attempts/attempt_001/result.json"
+jq --arg r "$(printf 'x%.0s' $(seq 1 9000))" '.report = $r | .worker_verification = null
+  | .worker_concerns = null | .worker_question = null' "$long_res" >"$long_res.tmp"
+mv "$long_res.tmp" "$long_res"
+set +e
+res="$(run_delegate "$oc" status "$long_task")"
+set -e
+[ "$(printf '%s' "$res" | wc -c)" -lt 3000 ] \
+  || fail "opencode: a single huge report line was not capped ($(printf '%s' "$res" | wc -c) bytes)"
+echo "$res" | grep -q 'truncated to the last 2000 characters' \
+  || fail "opencode: byte truncation is not announced: $res"
+set +e
+res="$(run_delegate "$oc" status "$long_task" --full)"
+set -e
+[ "$(printf '%s' "$res" | wc -c)" -gt 9000 ] || fail "opencode: --full did not restore the long report"
+run_delegate "$oc" decide "$long_task" accept --reason "fixture" >/dev/null
+
+# --json is never truncated, whatever the human view does
+res="$(run_delegate "$oc" status "$blocked_task" --json)"
+echo "$res" | jq -e '.report | contains("STATUS: BLOCKED")' >/dev/null \
+  || fail "opencode: --json must carry the whole report: $res"
 
 # --- legacy state ------------------------------------------------------------
 

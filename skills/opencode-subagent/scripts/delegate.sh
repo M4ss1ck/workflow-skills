@@ -37,6 +37,7 @@
 #   --stall-seconds SECS     provider silence that ends a wait early (default 300)
 #   --no-stall-return        block for the full poll timeout even if it looks stalled
 #   --save-default           persist --model as the configured worker model
+#   --full                   print the worker report in full, untruncated
 #   --json                   machine-readable output
 #
 # Exit codes: 0 finished  1 verification failed  2 usage/config  3 still running
@@ -90,6 +91,7 @@ stall_key="OPENCODE_SUBAGENT_STALL_SECONDS"
 default_stall_seconds=300
 no_stall_return=0
 wait_any=0
+report_full=0
 wait_returned="poll_timeout"
 runner_attemptdir=""
 json_out=0
@@ -134,6 +136,7 @@ while [ "$#" -gt 0 ]; do
     --stall-seconds) shift; stall_threshold="${1:?--stall-seconds requires seconds}" ;;
     --no-stall-return) no_stall_return=1 ;;
     --any)          wait_any=1 ;;
+    --full)         report_full=1 ;;
     --limit)        shift; limit="${1:?--limit requires a number}" ;;
     --active)       only_active=1 ;;
     --all)          only_active=0 ;;
