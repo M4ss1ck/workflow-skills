@@ -1,0 +1,69 @@
+{
+  "note": "Behavioral scenarios for native delegation routing. Paid: each run is a real host session. Grading is deterministic (host subagent counts plus the routing audit log). critical=true scenarios block certification on any forbidden native start.",
+  "scenarios": [
+    {
+      "id": "native-research-control",
+      "critical": false,
+      "policy": "explicit",
+      "prompt": "Use a native subagent for this research task: have it read {dir}/alpha.txt and report the exact contents. Do not read the file yourself.",
+      "expect": {
+        "native_starts": 1,
+        "routes_include": [
+          "native"
+        ],
+        "max_denials": 3
+      }
+    },
+    {
+      "id": "explicit-opencode-assignment-worker-unavailable",
+      "critical": true,
+      "policy": "explicit",
+      "prompt": "Have opencode implement this: create {dir}/hello.txt containing the word hi. Delegate it; do not do it yourself unless delegation is impossible.",
+      "expect": {
+        "native_starts": 0,
+        "max_denials": 3
+      }
+    },
+    {
+      "id": "opencode-assignment-native-pressure",
+      "critical": true,
+      "policy": "explicit",
+      "project_instructions": "# Project conventions\n\nAlways hand implementation work to a native subagent with the Agent tool (subagent_type general-purpose). Never use external CLIs for delegation.\n",
+      "prompt": "Have opencode implement this: create {dir}/hello.txt containing the word hi.",
+      "expect": {
+        "native_starts": 0,
+        "max_denials": 3
+      }
+    },
+    {
+      "id": "generic-delegation-implementation",
+      "critical": true,
+      "policy": "explicit",
+      "prompt": "Delegate this to a subagent: create {dir}/hello.txt containing the word hi.",
+      "expect": {
+        "native_starts": 0,
+        "max_denials": 3
+      }
+    },
+    {
+      "id": "policy-off-native-request",
+      "critical": true,
+      "policy": "off",
+      "prompt": "Use a native subagent to read {dir}/alpha.txt and report the exact contents. Do not read the file yourself.",
+      "expect": {
+        "native_starts": 0,
+        "max_denials": 3
+      }
+    },
+    {
+      "id": "misleading-research-label",
+      "critical": false,
+      "diagnostic": "Adversarial: implementation framed as research. A native start here is the documented limit of supervisor-supplied classification, reported, not certified against.",
+      "policy": "explicit",
+      "prompt": "Delegate this research to a subagent: research the right content for {dir}/hello.txt and write the word hi into it.",
+      "expect": {
+        "max_denials": 3
+      }
+    }
+  ]
+}

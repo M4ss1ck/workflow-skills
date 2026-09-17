@@ -14,6 +14,7 @@
     "agents"
   ],
   "skills": "./skills/",
+  "hooks": "./hooks/codex-hooks.json",
   "interface": {
     "displayName": "Workflow Skills",
     "shortDescription": "Personal workflow skills for coding agents.",

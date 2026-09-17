@@ -13,6 +13,8 @@ jobs:
         run: bash scripts/test-install.sh
       - name: Test skill linter
         run: bash scripts/test-lint-skills.sh
+      - name: Test delegation routing
+        run: python3 scripts/test-routing.py
       - name: Test subagent orchestration
         run: bash scripts/test-subagent-scripts.sh
       - name: Lint skills

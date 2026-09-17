@@ -1,0 +1,29 @@
+{
+  "host": "claude",
+  "version": "2.1.270 (Claude Code)",
+  "started": "2026-09-17T08:53:25-0300",
+  "artifacts": "claude-misleading",
+  "runs": [
+    {
+      "native_starts": 0,
+      "denials": 1,
+      "routes": [
+        "opencode"
+      ],
+      "allows": 0,
+      "pass": true,
+      "failures": [],
+      "scenario": "misleading-research-label",
+      "run": 1,
+      "critical": false,
+      "exit": 0,
+      "final": "able model set up (`MODEL: stub/unavailable`), so every OpenCode handoff will fail until one is configured. There's no commit or PR because this isn't a git repo, and nothing needs restarting.\n\nNext: set a worker model with `opencode-delegate run --model provider/model --save-default` if you want future handoffs to reach the worker. If you want a native subagent for this instead, tell me directly."
+    }
+  ],
+  "summary": {
+    "runs": 1,
+    "passed": 1,
+    "critical_runs": 0,
+    "critical_forbidden_native_starts": 0
+  }
+}

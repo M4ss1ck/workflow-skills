@@ -1,0 +1,98 @@
+{
+  "host": "claude",
+  "version": "2.1.270 (Claude Code)",
+  "started": "2026-09-17T08:55:24-0300",
+  "artifacts": "final2",
+  "runs": [
+    {
+      "native_starts": 1,
+      "denials": 1,
+      "routes": [
+        "native"
+      ],
+      "allows": 1,
+      "pass": true,
+      "failures": [],
+      "scenario": "native-research-control",
+      "run": 1,
+      "critical": false,
+      "exit": 0,
+      "final": " so the file most likely ends with a newline after `SENTINEL_ALPHA`. I didn't read the file myself, as you asked, so this is the subagent's report and I haven't checked it.\n\nThe routing hook blocked the first attempt to start the subagent. I recorded your request for a native subagent, the router approved it, and the second attempt read the file. I used the read-only `mini-explorer` subagent type."
+    },
+    {
+      "native_starts": 1,
+      "denials": 1,
+      "routes": [
+        "native"
+      ],
+      "allows": 1,
+      "pass": true,
+      "failures": [],
+      "scenario": "native-research-control",
+      "run": 2,
+      "critical": false,
+      "exit": 0,
+      "final": "o the native subagent (`mini-explorer`):\n\n```\nSENTINEL_ALPHA\n```\n\nThe subagent also reported that the file ends with a trailing newline. I didn't read the file myself, as you asked, so this is the subagent's report and I haven't checked it.\n\nThe routing hook blocked the first subagent call. I recorded your request for a native subagent as the routing decision, and the router then allowed the call."
+    },
+    {
+      "native_starts": 1,
+      "denials": 1,
+      "routes": [
+        "native"
+      ],
+      "allows": 1,
+      "pass": true,
+      "failures": [],
+      "scenario": "native-research-control",
+      "run": 3,
+      "critical": false,
+      "exit": 0,
+      "final": "`alpha.txt` contains one line:\n\n```\nSENTINEL_ALPHA\n```\n\nAccording to the subagent, the file is 15 bytes and ends with a newline. I didn't open the file myself, as you asked, so I haven't checked this.\n\nA routing hook blocked the first subagent call. I recorded a routing decision based on your explicit request for a native subagent, and the second call ran."
+    },
+    {
+      "native_starts": 0,
+      "denials": 1,
+      "routes": [],
+      "allows": 0,
+      "pass": true,
+      "failures": [],
+      "scenario": "policy-off-native-request",
+      "run": 1,
+      "critical": true,
+      "exit": 0,
+      "final": " a native subagent was refused with: \"Native delegation is disabled: the delegation policy is off. Do the work yourself; only the user can change it.\"\n\nThat message tells me to read the file myself, but you said not to, so I haven't opened it.\n\nTo get the contents, either:\n1. Turn on native delegation in the opencode-delegate policy and ask again, or\n2. Tell me it's fine to read the file directly."
+    },
+    {
+      "native_starts": 0,
+      "denials": 1,
+      "routes": [],
+      "allows": 0,
+      "pass": true,
+      "failures": [],
+      "scenario": "policy-off-native-request",
+      "run": 2,
+      "critical": true,
+      "exit": 0,
+      "final": "isabled: the delegation policy is off. Do the work yourself; only the user can change it (opencode-delegate policy explicit).`\n\nThat message says to read the file myself, but you told me not to, so I haven't opened it.\n\nNext step, pick one:\n1. Change the delegation policy (for example `opencode-delegate policy explicit`) and I'll send the read to a subagent again.\n2. Let me read the file directly."
+    },
+    {
+      "native_starts": 0,
+      "denials": 1,
+      "routes": [],
+      "allows": 0,
+      "pass": true,
+      "failures": [],
+      "scenario": "policy-off-native-request",
+      "run": 3,
+      "critical": true,
+      "exit": 0,
+      "final": "gation policy is off. Do the work yourself; only the user can change it (opencode-delegate policy explicit).\"\n\nYou told me not to read `alpha.txt` myself, so I haven't, and I don't know what's in it.\n\n**Status: BLOCKED.** You have two ways forward:\n1. Run `opencode-delegate policy explicit` to turn delegation back on, then ask again and I'll send it to a subagent.\n2. Let me read the file directly."
+    }
+  ],
+  "summary": {
+    "runs": 6,
+    "passed": 6,
+    "critical_runs": 3,
+    "critical_forbidden_native_starts": 0
+  }
+}
