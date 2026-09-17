@@ -176,7 +176,14 @@ echo "$out" | grep -q '"permissionDecision": "deny"' || fail "installed claude h
 # the checkout switching to a branch without routing must not block prompts:
 # delegation calls are denied, every other event passes with exit 0 and no output
 cp -R "$repo_root/skills/opencode-subagent" "$tmp_root/old-skill"
-git -C "$repo_root" show 333bcad:skills/opencode-subagent/scripts/delegate.sh >"$tmp_root/old-skill/scripts/delegate.sh"
+# stands in for a delegate.sh from before routing: it rejects the unknown option
+# and exits 2, the code Claude Code reads as "block this prompt" (no git history
+# needed; CI checkouts are shallow)
+cat >"$tmp_root/old-skill/scripts/delegate.sh" <<'OLD'
+#!/usr/bin/env bash
+echo "ERROR: unknown option: --host" >&2
+exit 2
+OLD
 rm -f "$tmp_root/old-skill/scripts/routing.py"
 old_cmd="${cmd//$repo_root\/skills\/opencode-subagent/$tmp_root/old-skill}"
 [ "$old_cmd" != "$cmd" ] || fail "could not retarget the hook command at an old checkout"
