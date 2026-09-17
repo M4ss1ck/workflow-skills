@@ -1,6 +1,6 @@
 ---
 name: opencode-subagent
-description: 'Delegate bounded, mechanically verifiable implementation work to a cheap OpenCode worker and verify the result yourself. Use when the user asks to delegate to OpenCode ("delegate this to opencode", "have opencode implement this", "/opencode-subagent"), and — when delegation_policy=auto — when you are about to spend a long read/edit/test loop on work whose design is already settled. This runs a paid external CLI: respect the configured delegation policy.'
+description: 'Delegate bounded, mechanically verifiable implementation work to a cheap OpenCode worker and verify the result yourself. Use when the user asks to delegate to OpenCode ("delegate this to opencode", "have opencode implement this", "/opencode-subagent"), and — when delegation_policy=auto — when you are about to spend a long read/edit/test loop on work whose design is already settled. Also use before creating or messaging a native subagent (Agent, SendMessage, spawn_agent, followup_task), and whenever an opencode-subagent routing hook denies one. This runs a paid external CLI: respect the configured delegation policy.'
 argument-hint: 'Required: the task to delegate. Optional: model as provider/model (defaults to the configured worker model).'
 ---
 
@@ -82,6 +82,62 @@ Poor candidates: architectural design; choosing abstractions; diagnosing an uncl
 
 Under `explicit`, the user's request is sufficient authorization. Under `auto`, apply the table above yourself and say in one line what you delegated and why.
 
+The policy governs **all** delegation, native subagents included, not only OpenCode launches.
+
+## Native delegation routing
+
+With the routing hooks installed (Claude Code and Codex CLI only; see `opencode-delegate route doctor`), every native call that creates an agent or gives an existing one more work is denied until a routing decision is recorded for it. Status, wait and cancel calls are never blocked.
+
+When a hook denies a native call:
+
+1. Read the proposal: `opencode-delegate route show PROPOSAL`. It prints the call, the current policy, and this skill's revision.
+2. Classify the work honestly and record it:
+
+   ```bash
+   opencode-delegate route record --proposal PROPOSAL \
+     --assignment parser-tests --scope "write tests for the parser" \
+     --work-kind implementation|research|review \
+     --authorization user|workflow|none \
+     --source-excerpt "verbatim words of the user (or workflow file) that authorize delegation" \
+     [--workflow-file PATH] \
+     --requested-provider opencode|native|unspecified \
+     [--native-reason "why the OpenCode implementation worker is unsuitable"] \
+     --scope-status clear|ambiguous|conflicting \
+     --skill-revision REVISION
+   ```
+
+3. Follow the printed route exactly:
+
+| Route | Do |
+|---|---|
+| `native` | Repeat the native call **once**, before the next user message, from the same worktree. The hook runs the proposal exactly as first submitted, even if you reword it. |
+| `opencode` | Do not repeat the native call. Delegate with `opencode-delegate start` and verify. |
+| `local` | Do not repeat the native call. Do the work yourself. |
+| `none` | Delegation is off. Do the work yourself and tell the user how to change the policy if it matters. |
+| `clarify` | Ask the user to resolve the scope, or work locally. |
+
+The router computes the route; you only supply facts. How it decides:
+
+| Policy and record | Route |
+|---|---|
+| `off` | `none` |
+| scope not `clear` | `clarify` |
+| assignment previously routed to OpenCode | `opencode`, unless a **later** user message explicitly asks for native |
+| `--requested-provider opencode` (user or workflow source) | `opencode` |
+| `--requested-provider native` with a user source | `native` |
+| `explicit`, `--authorization none` | `local`: you choosing to delegate is not authorization |
+| authorized (user/workflow source, or `auto`), implementation | `opencode` |
+| authorized, research or review with `--native-reason` | `native` |
+
+Rules:
+
+- `--source-excerpt` must be quoted verbatim from a user message in this session, or from a `--workflow-file` (an `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` or `SKILL.md` committed unmodified in the worktree's git repository). Quoting a mention, a negation ("don't use opencode") or a file the user pasted is misrecording; the router checks the words exist, not what they mean.
+- Keep the same `--assignment` slug for the same piece of work. An explicit OpenCode assignment stays OpenCode: if OpenCode fails, report it and work locally; going native needs a new explicit user instruction.
+- Do not relabel implementation as research to get a native agent.
+- A denial that says the router cannot evaluate the call (broken state, runtime mismatch, no captured user input) means work locally and tell the user what `opencode-delegate route doctor` reports. Never retry in a loop, and never route around the hook through a shell or another CLI.
+- A grant belongs to the agent that recorded it: a subagent cannot spend its parent's grant. Parallel native calls each need their own recorded decision.
+- A new user message, a policy change, compaction or resume retires unused grants. Grants expire after 30 minutes.
+
 ## Lifecycle
 
 ```text
@@ -89,7 +145,7 @@ delegate → inspect → wait → interpret the worker outcome → verify indepe
    → accept  OR  record a correction and retry  OR  take over
 ```
 
-1. **Check the policy** when considering delegation the user did not request: `opencode-delegate policy`. If `explicit` or `off`, do the work yourself.
+1. **Check the policy** when considering delegation the user did not request: `opencode-delegate policy`. If `explicit` or `off`, do the work yourself. The same applies to native subagents (see Native delegation routing).
 
 2. **Write the job packet.** Task-specific facts only — the worker's standing rules (no redesign, no further delegation, no commits, report format) live in its agent definition.
 
@@ -192,6 +248,9 @@ opencode-delegate events TASK
 opencode-delegate logs   TASK [ATTEMPT] [--stream report|request|raw|stderr|progress|result|meta|changed]
 opencode-delegate recover                       # reconcile state after a crash
 opencode-delegate policy [off|explicit|auto]
+opencode-delegate route show [PROPOSAL]         # a denied native call and how to record it
+opencode-delegate route record --proposal P ... # record a routing decision
+opencode-delegate route doctor                  # hooks, PATH command, runtime, policy
 ```
 
 Decisions: `accept` · `retry` · `reject` · `cancel` · `take_over` · `continue_waiting`. `--reason` is required for `retry`, `reject` and `take_over` — the reason is the durable record of why.

@@ -25,6 +25,9 @@
 #   delegate.sh recover                         reconcile durable state after a crash
 #   delegate.sh policy [off|explicit|auto]
 #
+# Routing native delegation (see scripts/routing.py):
+#   delegate.sh route hook|record|show|doctor|identity
+#
 # Options:
 #   --model provider/model   worker model (overrides the configured one)
 #   --cwd DIR                working tree for the worker
@@ -106,6 +109,28 @@ skip_decision=0
 task_id=""
 task_dir=""
 positionals=()
+
+# Native delegation routing (hooks and supervisors) never touches Tasks, the
+# worker model or OpenCode: dispatch before any of that is parsed or prepared.
+if [ "${1:-}" = "route" ]; then
+  shift
+  python="${OPENCODE_DELEGATE_PYTHON:-python3}"
+  if ! command -v "$python" >/dev/null 2>&1; then
+    if [ "${1:-}" = "hook" ]; then
+      # No interpreter means no router: fail closed for delegation calls only.
+      payload="$(cat)"
+      case "$payload" in
+        *'"PreToolUse"'*)
+          printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"opencode-subagent routing cannot run: its Python interpreter was not found. Native delegation stays blocked; run opencode-delegate route doctor."}}' ;;
+      esac
+      exit 0
+    fi
+    die_route="ERROR: routing needs Python 3 ($python not found; set OPENCODE_DELEGATE_PYTHON)"
+    echo "$die_route" >&2
+    exit 2
+  fi
+  exec "$python" "$skill_dir/scripts/routing.py" "$@"
+fi
 
 # shellcheck source=skills/opencode-subagent/scripts/orchestration.sh
 . "$skill_dir/scripts/orchestration.sh"

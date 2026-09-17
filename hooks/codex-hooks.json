@@ -1,0 +1,39 @@
+{
+  "description": "workflow-skills (Codex plugin): route native agent delegation through a recorded opencode-subagent decision.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/skills/opencode-subagent/scripts/delegate.sh\" route hook --host codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/skills/opencode-subagent/scripts/delegate.sh\" route hook --host codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Agent|Task|SendMessage|collaborationspawn_agent|spawn_agent|collaborationfollowup_task|collaborationsend_message|send_input|collaborationresume_agent|resume_agent)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/skills/opencode-subagent/scripts/delegate.sh\" route hook --host codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

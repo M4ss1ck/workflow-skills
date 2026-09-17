@@ -30,6 +30,7 @@ The body holds the instructions the agent follows when the skill is active. Keep
 - Match the tone and structure of existing skills; use `templates/skill-template.md` as the starting point.
 - `opencode-subagent` uses a Task/Attempt/Event layout (`subagents/task_<id>/` with `task.json`, `events.jsonl`, `attempts/attempt_NNN/`, `verifications/`), implemented in `scripts/orchestration.sh` and driven by `scripts/delegate.sh`. Pre-Task job directories (`subagents/<JOB>/` with `status`, `result.txt`, `raw.jsonl`) may still exist in the shared state root: only directories containing `task.json` are Tasks, and pruning touches only `task_*` and `opencode-*` directories.
 - `opencode-subagent` exposes explicit operations (`start / run / retry / resume / status / wait / verify / decide / cancel / list / show / attempts / events / logs / recover / policy`), `--json`, and a delegation policy, alongside the legacy flag forms (`--model / --cwd / --resume / --timeout / --save-default / --wait / --poll-timeout`). `scripts/install.sh` also puts it on PATH as `opencode-delegate`, which is how `SKILL.md` invokes it.
+- Native delegation routing lives in `skills/opencode-subagent/scripts/routing.py`, reached only as `delegate.sh route ...` (dispatched before any Task or worker setup). `hooks/hooks.json` (Claude plugin) and `hooks/codex-hooks.json` (Codex plugin, selected in `.codex-plugin/plugin.json`) must stay identical apart from the root variable and `--host`; the installer registers the same events through the owned `route-hook-shim.sh`, marked `# workflow-skills-routing`. Behavioral evals (`tests/evals/delegation-routing/run.py`) are paid live host sessions: run them only deliberately, and never edit `routing.py` or `SKILL.md` while one runs (the runtime identity and skill revision are part of every decision). Routing state is under `$XDG_STATE_HOME/workflow-skills/routing/`, separate from Task directories. Tool names in `WORK_TOOLS` and the `hooks.json` matcher must stay in sync (a test enforces it).
 - A skill may ship OpenCode agent definitions in `skills/<name>/agents/*.md`. `scripts/install.sh --agent opencode` installs them into `~/.config/opencode/agent/`, and `opencode-subagent/scripts/delegate.sh` re-syncs its own before every launch. `opencode run --agent NAME` falls back to the unconstrained default agent with only a warning when the name is unknown, so the definition must be on disk before launching.
 
 ## Before you finish
@@ -58,6 +59,12 @@ Run the subagent script tests when changing any `skills/*-subagent/scripts/deleg
 
 ```bash
 bash scripts/test-subagent-scripts.sh
+```
+
+Run the routing tests when changing `skills/opencode-subagent/scripts/routing.py`, `route-hook-shim.sh`, `hooks/*.json`, the `route` dispatch in `delegate.sh`, or the opencode-subagent `SKILL.md` routing section (deterministic, no model calls, under 2s):
+
+```bash
+python3 scripts/test-routing.py
 ```
 
 ## Planning artifacts

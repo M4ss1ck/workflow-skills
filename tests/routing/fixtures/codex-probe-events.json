@@ -1,0 +1,113 @@
+{
+  "host": "codex",
+  "source": "live probes of Codex CLI 0.151.0, 2026-09-17; ids, paths and prompts sanitized",
+  "events": [
+    {
+      "session_id": "codex-fixture-session",
+      "turn_id": "fixture-turn",
+      "hook_event_name": "UserPromptSubmit",
+      "permission_mode": "bypassPermissions",
+      "prompt": "Fixture prompt: delegate the sentinel read.",
+      "cwd": "/fixture/work"
+    },
+    {
+      "session_id": "codex-fixture-session",
+      "turn_id": "fixture-turn",
+      "hook_event_name": "PreToolUse",
+      "permission_mode": "bypassPermissions",
+      "tool_name": "collaborationspawn_agent",
+      "tool_input": {
+        "agent_type": "explorer",
+        "fork_turns": "none",
+        "message": "gAAAA-redacted-opaque-message",
+        "task_name": "read_sentinel"
+      },
+      "tool_use_id": "call_s1ZD07iVf0yhzLQyRb7gMhFU",
+      "cwd": "/fixture/work"
+    },
+    {
+      "session_id": "codex-fixture-session",
+      "turn_id": "fixture-turn",
+      "hook_event_name": "PreToolUse",
+      "permission_mode": "bypassPermissions",
+      "tool_name": "collaborationspawn_agent",
+      "tool_input": {
+        "agent_type": "explorer",
+        "fork_turns": "all",
+        "message": "gAAAA-redacted-opaque-message",
+        "task_name": "sentinel_reader"
+      },
+      "tool_use_id": "call_YkkH6nQvkuRQjyXtPJMNcvnv",
+      "cwd": "/fixture/work"
+    },
+    {
+      "session_id": "codex-fixture-session",
+      "turn_id": "fixture-turn",
+      "hook_event_name": "PreToolUse",
+      "permission_mode": "bypassPermissions",
+      "tool_name": "collaborationwait_agent",
+      "tool_input": {
+        "timeout_ms": 3600000
+      },
+      "tool_use_id": "call_vs4mVh5oA84kiH01RnHJvZlT",
+      "cwd": "/fixture/work"
+    },
+    {
+      "session_id": "codex-fixture-session",
+      "turn_id": "fixture-turn",
+      "agent_id": "01a0af13-e654-76b3-bc57-5713a43baab9",
+      "agent_type": "explorer",
+      "hook_event_name": "PreToolUse",
+      "permission_mode": "bypassPermissions",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "cat /fixture/matched-codex-continuation/sentinel.txt"
+      },
+      "tool_use_id": "exec-4ce2038e-822d-4285-8cb0-b61df3578dd0",
+      "cwd": "/fixture/work"
+    },
+    {
+      "session_id": "codex-fixture-session",
+      "turn_id": "fixture-turn",
+      "hook_event_name": "PreToolUse",
+      "permission_mode": "bypassPermissions",
+      "tool_name": "collaborationfollowup_task",
+      "tool_input": {
+        "message": "gAAAA-redacted-opaque-message",
+        "target": "/root/sentinel_reader"
+      },
+      "tool_use_id": "call_jZI07RvsV8hPiObevhZ0sZgP",
+      "cwd": "/fixture/work"
+    },
+    {
+      "session_id": "codex-fixture-session",
+      "turn_id": "fixture-turn",
+      "hook_event_name": "PreToolUse",
+      "permission_mode": "bypassPermissions",
+      "tool_name": "collaborationspawn_agent",
+      "tool_input": {
+        "task_name": "binding_probe",
+        "fork_turns": "none",
+        "agent_type": "default",
+        "message": "gAAAA-redacted-opaque-message"
+      },
+      "tool_use_id": "call_R0hramFwB7qXm7yn1G5lTlkK",
+      "cwd": "/fixture/work"
+    },
+    {
+      "session_id": "codex-fixture-session",
+      "turn_id": "fixture-turn",
+      "hook_event_name": "PreToolUse",
+      "permission_mode": "bypassPermissions",
+      "tool_name": "collaborationspawn_agent",
+      "tool_input": {
+        "task_name": "binding_probe",
+        "fork_turns": "none",
+        "agent_type": "default",
+        "message": "gAAAA-redacted-opaque-message"
+      },
+      "tool_use_id": "call_0AwJBreJIyqtWeqyqtWvhUEF",
+      "cwd": "/fixture/work"
+    }
+  ]
+}

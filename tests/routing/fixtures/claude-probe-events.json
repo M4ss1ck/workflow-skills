@@ -1,0 +1,75 @@
+{
+  "host": "claude",
+  "source": "live probes of Claude Code 2.1.270, 2026-09-17; ids, paths and prompts sanitized",
+  "events": [
+    {
+      "session_id": "claude-fixture-session",
+      "permission_mode": "default",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "Fixture prompt: delegate the sentinel read.",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt"
+    },
+    {
+      "session_id": "claude-fixture-session",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Agent",
+      "tool_input": {
+        "description": "Read sentinel probe file",
+        "prompt": "Read the file /fixture/deny/sentinel.txt and report its exact contents.",
+        "subagent_type": "routing-probe",
+        "run_in_background": false
+      },
+      "tool_use_id": "toolu_01PJpGQGKCxGPwwJkQhP3a6q",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt"
+    },
+    {
+      "session_id": "claude-fixture-session",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Agent",
+      "tool_input": {
+        "description": "Read sentinel probe file",
+        "prompt": "Read the file /fixture/continuation/sentinel.txt and report its exact contents.",
+        "subagent_type": "routing-probe",
+        "run_in_background": false
+      },
+      "tool_use_id": "toolu_01KYzw7xspcYaoTwHZTXcPTr",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt"
+    },
+    {
+      "session_id": "claude-fixture-session",
+      "permission_mode": "default",
+      "agent_id": "af93df43ae1007e1c",
+      "agent_type": "routing-probe",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "/fixture/continuation/sentinel.txt"
+      },
+      "tool_use_id": "toolu_01D8wyfxwSb8vwfFoGianPN1",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt"
+    },
+    {
+      "session_id": "claude-fixture-session",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "SendMessage",
+      "tool_input": {
+        "to": "af93df43ae1007e1c",
+        "summary": "Read sentinel file a second time",
+        "message": "Please read the file /fixture/continuation/sentinel.txt again and report its exact contents.",
+        "type": "message",
+        "recipient": "af93df43ae1007e1c",
+        "content": "Please read the file /tmp/delegation-routing-hook\u2026"
+      },
+      "tool_use_id": "toolu_0153D9FwET5PTfN2PtDSxEGz",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt"
+    }
+  ]
+}
