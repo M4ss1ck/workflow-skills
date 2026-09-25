@@ -109,6 +109,15 @@ doctor() {
       printf '%-10s MISSING\n' "$tool"
     fi
   done
+  # opencode-subagent drives OpenCode 2.x only; 1.x fails every launch.
+  if command -v opencode >/dev/null 2>&1; then
+    local oc_version
+    oc_version="$(opencode --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    case "$oc_version" in
+      '') printf '%-10s WARN  could not read the OpenCode version; opencode-subagent needs 2.x\n' "opencode" ;;
+      0.*|1.*) printf '%-10s WARN  OpenCode %s is not supported by opencode-subagent (needs 2.x): opencode upgrade\n' "opencode" "$oc_version" ;;
+    esac
+  fi
   if command -v opencode-delegate >/dev/null 2>&1; then
     printf '%-10s ok    %s\n' "delegate" "$(command -v opencode-delegate)"
   else
@@ -486,8 +495,8 @@ install_into() {
 }
 
 # Skills that ship an OpenCode agent definition need it in OpenCode's agent
-# directory, otherwise `opencode run --agent NAME` silently falls back to the
-# unconstrained default agent.
+# directory, otherwise `opencode run --agent NAME` fails (OpenCode 2.x) or
+# silently falls back to the unconstrained default agent (1.x).
 install_opencode_agents() {
   local dest_dir="$HOME/.config/opencode/agent"
   local src name
