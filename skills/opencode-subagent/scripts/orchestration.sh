@@ -13,7 +13,8 @@
 #       request.md               the exact text sent to the worker
 #       meta.json                launch inputs (model, cwd, session, retry_of, reason)
 #       result.json              transport + worker outcome, written when the run ends
-#       raw.jsonl stderr.log provider-progress.json worker-report.txt
+#       raw.jsonl stderr.log provider-progress.json provider-baseline.json
+#       provider-errors.log worker-report.txt
 #       changed-files.txt git-before.txt git-after.txt pid process.json
 #       provider.pid provider-process.json launcher.err
 #
@@ -332,10 +333,15 @@ parse_worker_report() {
 # One recommendation per failure shape. The supervisor is never obliged to
 # follow it; nothing here performs recovery on its own.
 
-# classify_attempt EXIT_CODE WORKER_STATUS SESSION_ID STDERR_FILE -> "class|action"
+# classify_attempt EXIT_CODE WORKER_STATUS SESSION_ID STDERR_FILE [PROVIDER_ERRORS_FILE] -> "class|action"
+# OpenCode 2.x reports provider errors in its event stream, not on stderr, so
+# both are searched.
 classify_attempt() {
-  local code="$1" worker="$2" session="$3" errf="$4" err=""
+  local code="$1" worker="$2" session="$3" errf="$4" perrf="${5:-}" err=""
   [ -f "$errf" ] && err="$(tail -c 4000 "$errf" 2>/dev/null || true)"
+  if [ -n "$perrf" ] && [ -f "$perrf" ]; then
+    err="$err"$'\n'"$(tail -c 4000 "$perrf" 2>/dev/null || true)"
+  fi
   case "$code" in
     0)
       case "$worker" in

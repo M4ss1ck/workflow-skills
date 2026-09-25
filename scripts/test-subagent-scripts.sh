@@ -23,7 +23,11 @@ run_delegate() {
   STUB_RESUME_HANG="${STUB_RESUME_HANG:-0}" \
   STUB_FRESH_HANG="${STUB_FRESH_HANG:-0}" \
   STUB_NO_FINAL="${STUB_NO_FINAL:-0}" \
-  STUB_DB_FAIL="${STUB_DB_FAIL:-0}" \
+  STUB_EXPORT_FAIL="${STUB_EXPORT_FAIL:-0}" \
+  STUB_STREAM_ERROR="${STUB_STREAM_ERROR:-}" \
+  STUB_VERSION="${STUB_VERSION:-2.0.16}" \
+  STUB_SILENT_SLEEP="${STUB_SILENT_SLEEP:-0}" \
+  STUB_SESSION="${STUB_SESSION:-ses_oc1}" \
   STUB_STEPS="${STUB_STEPS:-1}" \
   STUB_FILES="${STUB_FILES:-- foo.txt}" \
   STUB_FINISH_DRIFT="${STUB_FINISH_DRIFT:-0}" \
@@ -53,9 +57,38 @@ launch_and_wait() {
 }
 
 # --- stub: opencode ---------------------------------------------------------
+# Mimics OpenCode 2.x: `--version`, `run --standalone --format json` whose
+# stream has no step_finish after the closing text, and `session export`, fed
+# from a per-session message store the stub run appends to.
 cat >"$stub_dir/opencode" <<'STUB'
 #!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  echo "opencode v${STUB_VERSION:-2.0.16}"
+  exit 0
+fi
+store_of() { printf '%s/sessions/%s.jsonl' "$STUB_DIR" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9_' '_')"; }
+
+if [ "${1:-}" = "session" ] && [ "${2:-}" = "export" ]; then
+  shift 2
+  [ "${1:-}" != "--standalone" ] || shift
+  printf '%s\n' "$1" >>"${STUB_DIR}/opencode-export.args"
+  if [ "${STUB_EXPORT_FAIL:-0}" = "1" ]; then
+    echo 'stub export failure' >&2
+    exit 1
+  fi
+  store="$(store_of "$1")"
+  jq -n --arg id "$1" --slurpfile m "$( [ -f "$store" ] && echo "$store" || echo /dev/null)" \
+    '{info: {id: $id}, messages: $m}'
+  exit 0
+fi
+
+if [ "${1:-}" = "session" ] && [ "${2:-}" = "list" ]; then
+  if [ -f "${STUB_DIR}/sessions/index.jsonl" ]; then jq -s 'reverse' "${STUB_DIR}/sessions/index.jsonl"; else echo '[]'; fi
+  exit 0
+fi
+
 printf '%s\n' "$*" >>"${STUB_DIR}/opencode.args"
+printf '%s\n' "$PWD" >>"${STUB_DIR}/opencode.pwd"
 
 # The worker's real contract is the STATUS/FILES_CHANGED/VERIFICATION/CONCERNS
 # block; STUB_STATUS picks which semantic outcome this turn reports.
@@ -69,87 +102,80 @@ worker_report() {
   printf 'CONCERNS:\n- none\n'
 }
 
-if [ "${1:-}" = "db" ]; then
-  if [ "${2:-}" = "path" ]; then
-    : >"${STUB_DIR}/opencode.db"
-    echo "${STUB_DIR}/opencode.db"
-    exit 0
-  fi
-  printf '%s\n' "${2:-}" >>"${STUB_DIR}/opencode-db.sql"
-  if [ "${STUB_DB_FAIL:-0}" = "1" ]; then
-    echo 'stub database failure' >&2
-    exit 1
-  fi
-  case "${2:-}" in
-    *"json_extract(data, '$.finish') = 'stop'"*)
-      if [ "${STUB_NO_FINAL:-0}" = "1" ] || [ "${STUB_FINISH_DRIFT:-0}" = "1" ] || [ ! -s "${STUB_DIR}/opencode-final.id" ]; then
-        echo '[]'
-      else
-        printf '[{"id":"%s"}]\n' "$(cat "${STUB_DIR}/opencode-final.id")"
-      fi
-      ;;
-    *"SELECT id FROM message"*)
-      if [ -s "${STUB_DIR}/opencode-assistant.id" ]; then
-        printf '[{"id":"%s"}]\n' "$(cat "${STUB_DIR}/opencode-assistant.id")"
-      else
-        echo '[]'
-      fi
-      ;;
-    *"AS finish FROM message"*)
-      if [ "${STUB_FINISH_DRIFT:-0}" = "1" ]; then
-        echo '[{"finish":"completed"}]'
-      elif [ "${STUB_NO_FINAL:-0}" = "1" ]; then
-        echo '[{"finish":null}]'
-      else
-        echo '[{"finish":"stop"}]'
-      fi
-      ;;
-    *"SELECT json_extract(data, '$.text') AS text"*)
-      jq -c -n --arg t "$(worker_report)" '[{text: $t}]'
-      ;;
-    *"SELECT COALESCE(SUM"*)
-      echo '[{"cost":0.0042}]'
-      ;;
-    *"SELECT time_created, message_id"*)
-      echo '[{"time_created":2,"message_id":"msg_oc_final","type":"text","tool":null,"status":null,"text":"provider final verification passed"}]'
-      ;;
-    *)
-      echo '[]'
-      ;;
-  esac
-  exit 0
-fi
+session="${STUB_SESSION:-ses_oc1}"
+title=""
+prev=""
+for a in "$@"; do
+  [ "$prev" != "--session" ] || session="$a"
+  [ "$prev" != "--title" ] || title="$a"
+  prev="$a"
+done
+mkdir -p "${STUB_DIR}/sessions"
+[ -z "$title" ] || jq -c -n --arg id "$session" --arg t "$title" '{id: $id, title: $t}' >>"${STUB_DIR}/sessions/index.jsonl"
+store="$(store_of "$session")"
+# a session created by this run starts empty
+[[ " $* " == *" --session "* ]] || : >"$store"
+turn="$$-$RANDOM"
+last_arg="${!#}"
+# fixed, old provider timestamps: liveness must come from real activity, not these
+msg() {
+  jq -c -n --arg id "msg_${turn}_$1" --arg type "$2" --arg finish "${3:-}" --arg text "${4:-}" --arg tool "${5:-}" \
+    --argjson cost "${6:-null}" \
+    '{id: $id, type: $type, time: {created: 2000, completed: 2000}}
+     + (if $type == "user" then {text: $text} else {} end)
+     + (if $type == "assistant" then
+          {finish: (if $finish == "" then null else $finish end), cost: $cost,
+           content: ((if $text == "" then [] else [{type: "text", text: $text}] end)
+                     + (if $tool == "" then [] else [{type: "tool", name: $tool, state: {status: "completed"}}] end))}
+        else {} end)' >>"$store"
+}
+event() {
+  jq -c -n --arg type "$1" --arg s "$session" --argjson part "$2" '{type: $type, timestamp: 1, sessionID: $s, part: $part}'
+}
+
+msg u user "" "$last_arg"
 echo "stub banner noise (must stay out of raw.jsonl)" >&2
+if [ -n "${STUB_STREAM_ERROR:-}" ]; then
+  jq -c -n --arg s "$session" --arg m "$STUB_STREAM_ERROR" '{type: "error", timestamp: 1, sessionID: $s, error: {type: "unknown", message: $m}}'
+  exit 1
+fi
 case "$*" in *touch-artifact*) : >"$PWD/worker-artifact.txt" ;; esac
 case "$*" in *touch-two*) : >"$PWD/worker-artifact.txt"; : >"$PWD/other-artifact.txt" ;; esac
-turn="$$-$RANDOM"
-rm -f "${STUB_DIR}/opencode-final.id"
-printf 'msg_oc_assistant_%s\n' "$turn" >"${STUB_DIR}/opencode-assistant.id"
-cat <<'EOF'
-{"type":"step_start","timestamp":1,"sessionID":"ses_oc1","part":{"type":"step-start"}}
-EOF
+# 2.x says nothing on the stream until the model starts answering
+sleep "${STUB_SILENT_SLEEP:-0}"
+event step_start '{"type":"step-start"}'
 if { [ "${STUB_RESUME_HANG:-0}" = "1" ] && [[ " $* " == *" --session "* ]]; } \
   || { [ "${STUB_FRESH_HANG:-0}" = "1" ] && [[ " $* " != *" --session "* ]]; }; then
-  printf 'msg_oc_final_%s\n' "$turn" >"${STUB_DIR}/opencode-final.id"
+  msg a assistant stop "$(worker_report)" "" 0.0042
+  msg i idle
   sleep 30
   exit 0
 fi
 sleep "${STUB_SLEEP:-0}"
-if [ "${STUB_NO_FINAL:-0}" != "1" ]; then
-  printf 'msg_oc_final_%s\n' "$turn" >"${STUB_DIR}/opencode-final.id"
-fi
-# A real multi-step turn emits one step_finish per step, each carrying that
-# step's own cost.
+# A multi-step turn: one tool step per extra step, each with its own
+# step_finish and cost; the closing text step has no step_finish.
 i=1
 while [ "$i" -lt "${STUB_STEPS:-1}" ]; do
-  echo '{"type":"step_finish","timestamp":2,"sessionID":"ses_oc1","part":{"type":"step-finish","cost":0.0042,"tokens":{"total":100,"input":10,"output":5}}}'
+  event tool_use '{"type":"tool","tool":"glob","state":{"status":"completed"}}'
+  event step_finish '{"type":"step-finish","reason":"tool-calls","cost":0.0042}'
+  msg "t$i" assistant tool-calls "" glob 0.0042
+  event step_start '{"type":"step-start"}'
   i=$((i + 1))
 done
-jq -c -n --arg t "$(worker_report)" \
-  '{type:"text",timestamp:2,sessionID:"ses_oc1",part:{type:"text",text:$t}}'
-cat <<'EOF'
-{"type":"step_finish","timestamp":3,"sessionID":"ses_oc1","part":{"type":"step-finish","cost":0.0042,"tokens":{"total":13009,"input":171,"output":27}}}
-EOF
+if [ "${STUB_NO_FINAL:-0}" = "1" ]; then
+  # the turn stopped after a tool call, with nothing after it
+  event tool_use '{"type":"tool","tool":"glob","state":{"status":"completed"}}'
+  msg a assistant tool-calls "" glob 0.0042
+  exit 0
+fi
+event text "$(jq -c -n --arg t "$(worker_report)" '{type: "text", text: $t}')"
+if [ "${STUB_FINISH_DRIFT:-0}" = "1" ]; then
+  msg a assistant end_turn "$(worker_report)" "" 0.0042
+else
+  msg a assistant stop "$(worker_report)" "" 0.0042
+fi
+msg i idle
+exit 0
 STUB
 chmod +x "$stub_dir/opencode"
 
@@ -298,7 +324,7 @@ grep -q '^name: workflow-worker$' "$oc_agent" || fail "opencode: synced agent is
 # --- successful worker completion -------------------------------------------
 
 res="$(run_delegate "$oc" --wait "$task" --poll-timeout 30)"
-grep -q 'run --format json --agent workflow-worker --model anthropic/claude-haiku-4-5 do the thing' "$stub_dir/opencode.args" \
+grep -qE 'run --standalone --format json --agent workflow-worker --model anthropic/claude-haiku-4-5 --title workflow-worker task_[0-9-]+/attempt_001 do the thing' "$stub_dir/opencode.args" \
   || fail "opencode: unexpected args: $(cat "$stub_dir/opencode.args")"
 echo "$res" | grep -q '^SESSION: ses_oc1$' || fail "opencode: session not extracted: $res"
 echo "$res" | grep -q '^COST: 0.0042$' || fail "opencode: cost not extracted: $res"
@@ -631,6 +657,16 @@ set -e
 echo "$res" | jq -e '.liveness.process_alive == true and .task_state == "running"' >/dev/null \
   || fail "opencode: liveness missing from status --json: $res"
 
+# the session export feeds provider progress while the fresh run is still going
+for _ in 1 2 3; do
+  if grep -q 'slow task' "$td/attempts/attempt_001/provider-progress.json"; then break; fi
+  sleep 1
+done
+grep -q 'slow task' "$td/attempts/attempt_001/provider-progress.json" \
+  || fail "opencode: fresh-run provider progress stayed empty"
+[ ! -f "$td/attempts/attempt_001/result.json" ] \
+  || fail "opencode: progress check ran after the attempt ended; it proves nothing"
+
 # idle must come from what the provider recorded, not from the snapshot file's
 # mtime: the poller rewrites that file on a fixed interval, so its age can never
 # exceed the poll interval and possibly_stalled could never fire
@@ -652,12 +688,6 @@ set -e
 [ "$code" -eq 2 ] || fail "opencode: verify during a running attempt should exit 2, got $code"
 echo "$msg" | grep -q "outside the worker's turn" || fail "opencode: verify refusal unclear: $msg"
 
-for _ in 1 2 3; do
-  if grep -q 'provider final verification passed' "$td/attempts/attempt_001/provider-progress.json"; then break; fi
-  sleep 1
-done
-grep -q 'provider final verification passed' "$td/attempts/attempt_001/provider-progress.json" \
-  || fail "opencode: fresh-run provider progress stayed empty"
 res="$(run_delegate "$oc" --wait "$task" --poll-timeout 30)"
 echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: slow job did not finish clean: $res"
 
@@ -842,17 +872,17 @@ jq -e '.failure_class == "provider_turn_incomplete" and .recommended_action == "
 echo "$res" | grep -q 'before producing a provider-final response' \
   || fail "opencode: incomplete turn lacks actionable report: $res"
 
-# database query failures fall back to CLI output and still finalize job state
-out="$(STUB_DB_FAIL=1 run_delegate "$oc" "db fallback")"
+# session export failures fall back to CLI output and still finalize job state
+out="$(STUB_EXPORT_FAIL=1 run_delegate "$oc" "export fallback")"
 task="$(task_of "$out")"
 res="$(run_delegate "$oc" --wait "$task" --poll-timeout 30)"
-echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: DB failure replaced successful CLI exit: $res"
+echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: export failure replaced successful CLI exit: $res"
 # the report survived and was parsed: its status became the worker outcome and
 # its VERIFICATION text is rendered
-echo "$res" | grep -q '^WORKER: done$' || fail "opencode: DB failure lost the CLI report's status: $res"
-echo "$res" | grep -q 'stub check -> pass' || fail "opencode: DB failure lost the CLI report body: $res"
+echo "$res" | grep -q '^WORKER: done$' || fail "opencode: export failure lost the CLI report's status: $res"
+echo "$res" | grep -q 'stub check -> pass' || fail "opencode: export failure lost the CLI report body: $res"
 jq -e '.outcome.transport == "finished"' "$(taskdir_of "$task")/task.json" >/dev/null \
-  || fail "opencode: DB failure stranded running status"
+  || fail "opencode: export failure stranded running status"
 
 # an unknown provider finish value is schema drift, not proof of incompleteness
 out="$(STUB_FINISH_DRIFT=1 run_delegate "$oc" "finish drift")"
@@ -860,17 +890,107 @@ task="$(task_of "$out")"
 res="$(run_delegate "$oc" --wait "$task" --poll-timeout 30)"
 echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: finish-state drift caused false exit 4: $res"
 
-# SQL literals quote resume ids instead of allowing cross-session predicates
-: >"$stub_dir/opencode-db.sql"
+# session ids reach the CLI as one argument, never interpolated into a query
+: >"$stub_dir/opencode-export.args"
 launch_and_wait "$oc" --resume "abc' OR '1'='1" "quote session" >/dev/null
-grep -Fq "session_id='abc'' OR ''1''=''1'" "$stub_dir/opencode-db.sql" \
-  || fail "opencode: resume session was not SQL-quoted"
+grep -Fxq "abc' OR '1'='1" "$stub_dir/opencode-export.args" \
+  || fail "opencode: resume session id did not reach session export verbatim: $(cat "$stub_dir/opencode-export.args")"
 
-# --cwd maps to --dir
+# the stream alone completes a turn: 2.x never emits step_finish after the
+# closing text, and that must not read as an incomplete turn
+out="$(STUB_EXPORT_FAIL=1 STUB_STEPS=2 run_delegate "$oc" "stream only, tool step first")"
+task="$(task_of "$out")"
+res="$(run_delegate "$oc" --wait "$task" --poll-timeout 30)"
+echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: a 2.x stream without a closing step_finish was not complete: $res"
+echo "$res" | grep -q '^WORKER: done$' || fail "opencode: 2.x stream report not parsed: $res"
+
+# a turn that ended on a tool step is incomplete even when the export cannot be read
+out="$(STUB_EXPORT_FAIL=1 STUB_NO_FINAL=1 run_delegate "$oc" "stream only, no final text")"
+task="$(task_of "$out")"
+set +e
+run_delegate "$oc" --wait "$task" --poll-timeout 30 >/dev/null
+code=$?
+set -e
+[ "$code" -eq 4 ] || fail "opencode: a stream ending on a tool step should exit 4, got $code"
+
+# a resumed attempt reports its own turn, never the session's earlier final answer
+out="$(run_delegate "$oc" run --json "first turn for resume")"
+res_task="$(echo "$out" | jq -r .task_id)"
+out="$(STUB_NO_FINAL=1 STUB_EXPORT_FAIL=0 run_delegate "$oc" retry "$res_task" --reason "baseline check" "second turn")"
+set +e
+STUB_NO_FINAL=1 run_delegate "$oc" wait "$res_task" --poll-timeout 30 >/dev/null
+code=$?
+set -e
+[ "$code" -eq 4 ] || fail "opencode: resumed attempt adopted the previous turn's final answer (exit $code)"
+run_delegate "$oc" decide "$res_task" reject --reason "baseline fixture" >/dev/null || true
+
+# provider errors arrive in the 2.x stream, not on stderr, and still classify
+out="$(STUB_STREAM_ERROR='Unauthorized: invalid api key' run_delegate "$oc" "auth failure")"
+task="$(task_of "$out")"
+# wait returns early on a stream error; the runner finalizes just after
+for _ in $(seq 1 20); do
+  [ -f "$(taskdir_of "$task")/attempts/attempt_001/result.json" ] && break
+  sleep 0.5
+done
+jq -e '.failure_class == "authentication_error" and .recommended_action == "repair_infrastructure"' \
+  "$(taskdir_of "$task")/task.json" >/dev/null \
+  || fail "opencode: stream-reported auth error misclassified: $(jq -c '{failure_class, recommended_action}' "$(taskdir_of "$task")/task.json")"
+
+# --cwd runs the worker in that tree: 2.x has no --dir, so it is never passed
 : >"$stub_dir/opencode.args"
-launch_and_wait "$oc" --cwd /tmp "task" >/dev/null
-grep -q -- '--dir /tmp task' "$stub_dir/opencode.args" \
-  || fail "opencode: --cwd did not pass --dir: $(cat "$stub_dir/opencode.args")"
+: >"$stub_dir/opencode.pwd"
+cwd_repo="$stub_dir/work-cwd"
+mkdir -p "$cwd_repo"
+out="$(cd "$stub_dir" && run_delegate "$oc" run --json --cwd work-cwd "cwd task")"
+cwd_task="$(echo "$out" | jq -r .task_id)"
+grep -q -- '--dir' "$stub_dir/opencode.args" && fail "opencode: passed --dir, which 2.x rejects: $(cat "$stub_dir/opencode.args")"
+[ "$(tail -1 "$stub_dir/opencode.pwd")" = "$cwd_repo" ] \
+  || fail "opencode: worker did not run in --cwd: $(cat "$stub_dir/opencode.pwd")"
+jq -e --arg d "$cwd_repo" '.cwd == $d' "$(taskdir_of "$cwd_task")/task.json" >/dev/null \
+  || fail "opencode: relative --cwd not recorded as an absolute path: $(jq -r .cwd "$(taskdir_of "$cwd_task")/task.json")"
+# and a retry from anywhere else reuses that tree, still without --dir
+: >"$stub_dir/opencode.pwd"
+(cd / && run_delegate "$oc" retry "$cwd_task" --reason "cwd retry" "again" >/dev/null)
+run_delegate "$oc" wait "$cwd_task" --poll-timeout 30 >/dev/null
+[ "$(tail -1 "$stub_dir/opencode.pwd")" = "$cwd_repo" ] \
+  || fail "opencode: retry did not run in the Task's tree: $(cat "$stub_dir/opencode.pwd")"
+grep -q -- '--dir' "$stub_dir/opencode.args" && fail "opencode: retry passed --dir: $(cat "$stub_dir/opencode.args")"
+run_delegate "$oc" decide "$cwd_task" accept --reason "cwd fixture" >/dev/null
+
+# a --cwd that does not exist is a usage error before any Task exists
+set +e
+run_delegate "$oc" --cwd "$stub_dir/no-such-dir" "task" >/dev/null 2>&1
+code=$?
+set -e
+[ "$code" -eq 2 ] || fail "opencode: missing --cwd should exit 2, got $code"
+
+# OpenCode 1.x is refused as infrastructure before a Task exists or the CLI runs
+: >"$stub_dir/opencode.args"
+set +e
+msg="$(STUB_VERSION=1.18.32 run_delegate "$oc" "old cli" 2>&1)"
+code=$?
+set -e
+[ "$code" -eq 127 ] || fail "opencode: OpenCode 1.x should exit 127, got $code"
+echo "$msg" | grep -q 'needs OpenCode 2' || fail "opencode: unsupported-version error unclear: $msg"
+[ ! -s "$stub_dir/opencode.args" ] || fail "opencode: launched a worker on an unsupported CLI"
+
+# the session id is recorded before the stream says anything, so a cancel
+# during a slow first response still leaves something to resume
+out="$(STUB_SESSION=ses_silent STUB_SILENT_SLEEP=30 run_delegate "$oc" start "silent start")"
+task="$(task_of "$out")"
+for _ in $(seq 1 10); do
+  [ "$(jq -r '.session_id // ""' "$(taskdir_of "$task")/task.json")" = "ses_silent" ] && break
+  sleep 0.5
+done
+set +e
+run_delegate "$oc" cancel "$task" >/dev/null
+set -e
+jq -e '.session_id == "ses_silent"' "$(taskdir_of "$task")/task.json" >/dev/null \
+  || fail "opencode: session not discovered before the first stream event: $(jq -c '{session_id}' "$(taskdir_of "$task")/task.json")"
+
+# `help` is a subcommand, not a task
+out="$(run_delegate "$oc" help)"
+echo "$out" | grep -q 'Legacy forms still accepted' || fail "opencode: help subcommand did not print usage: $out"
 
 # --- usage errors ------------------------------------------------------------
 

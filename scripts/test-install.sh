@@ -34,7 +34,7 @@ HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent opencode >/dev/null
 assert_skill_installed "$tmp_home/.config/opencode/skills" report-changes
 
 # the opencode target also installs agent definitions shipped by skills,
-# otherwise `opencode run --agent NAME` falls back to the default agent
+# otherwise `opencode run --agent NAME` fails (or, on 1.x, falls back to the default agent)
 worker="$tmp_home/.config/opencode/agent/workflow-worker.md"
 [ -e "$worker" ] || { echo "FAIL  expected $worker" >&2; exit 1; }
 grep -q '^name: workflow-worker$' "$worker" \
@@ -121,6 +121,14 @@ out="$("$repo_root/scripts/install.sh" --doctor)"
 for tool in claude codex opencode jq; do
   echo "$out" | grep -q "$tool" || { echo "FAIL  --doctor missing $tool" >&2; exit 1; }
 done
+
+# --doctor flags an OpenCode that opencode-subagent cannot drive
+old_oc="$tmp_root/old-opencode"
+mkdir -p "$old_oc"
+printf '#!/bin/sh\necho 1.18.32\n' >"$old_oc/opencode"
+chmod +x "$old_oc/opencode"
+out="$(PATH="$old_oc:$PATH" HOME="$tmp_home" "$repo_root/scripts/install.sh" --doctor)"
+echo "$out" | grep -q 'OpenCode 1.18.32 is not supported' || { echo "FAIL  --doctor did not flag OpenCode 1.x: $out" >&2; exit 1; }
 
 # --doctor reports the subagent model conf
 mkdir -p "$tmp_home/.config/workflow-skills"

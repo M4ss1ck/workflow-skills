@@ -12,7 +12,9 @@ The savings come from context isolation (the worker's read/edit/test loop never 
 
 ## Invoking it
 
-`opencode-delegate` is on PATH once `scripts/install.sh` has run. If it is not (a host where the skill was copied rather than installed), call the script directly: `bash <this skill dir>/scripts/delegate.sh` — every command below is otherwise identical.
+`opencode-delegate` is on PATH once `scripts/install.sh` has run. If it is not (a host where the skill was copied rather than installed), call the script directly: `bash <this skill dir>/scripts/delegate.sh` — every command below is otherwise identical. `opencode-delegate help` prints the full command reference.
+
+Requires **OpenCode 2.x**. OpenCode 1.x is not supported: every launch checks `opencode --version` and refuses an older CLI with exit `127` before a Task is created.
 
 ## Division of responsibility
 
@@ -248,6 +250,7 @@ opencode-delegate events TASK
 opencode-delegate logs   TASK [ATTEMPT] [--stream report|request|raw|stderr|progress|result|meta|changed]
 opencode-delegate recover                       # reconcile state after a crash
 opencode-delegate policy [off|explicit|auto]
+opencode-delegate help                          # full command reference
 opencode-delegate route show [PROPOSAL]         # a denied native call and how to record it
 opencode-delegate route record --proposal P ... # record a routing decision
 opencode-delegate route doctor                  # hooks, PATH command, runtime, policy
@@ -259,7 +262,7 @@ Decisions: `accept` · `retry` · `reject` · `cancel` · `take_over` · `contin
 
 Options: `--model provider/model`, `--cwd DIR`, `--resume SESSION_ID`, `--new-session`, `--reason TEXT`, `--label TEXT`, `--timeout SECS` (default 1800), `--poll-timeout SECS`, `--stall-seconds SECS` (default 300), `--no-stall-return`, `--full`, `--save-default`, `--json`.
 
-Exit codes: `0` finished · `1` verification failed · `2` usage/config or verification-execution error · `3` still running · `4` incomplete turn, resume the session · `5` still running but stalled · `124` timeout · `127` missing CLI · `130` cancelled.
+Exit codes: `0` finished · `1` verification failed · `2` usage/config or verification-execution error · `3` still running · `4` incomplete turn, resume the session · `5` still running but stalled · `124` timeout · `127` missing or unsupported CLI (OpenCode older than 2.x) · `130` cancelled.
 
 `verify TASK -- CMD ARGS...` execs the argv; `verify TASK "cmd | cmd"` runs a shell line when you need pipes or `&&`.
 
@@ -331,14 +334,15 @@ attempts/attempt_NNN/
   request.md       the exact text sent to the worker
   meta.json result.json worker-report.txt changed-files.txt
   pid process.json provider.pid provider-process.json
-  raw.jsonl stderr.log provider-progress.json
+  raw.jsonl stderr.log provider-progress.json provider-baseline.json
+  provider-errors.log  (only when the OpenCode stream reported errors)
 ```
 
 On Linux, each persisted process identity includes the kernel boot ID and `/proc` start time as well as the PID, so a reboot or reused numeric PID is not mistaken for the old process. Other platforms fall back to `kill -0` liveness.
 
 `task.json` is authoritative for current state. `events.jsonl` is the append-only audit history, not a state-replay log. While holding the per-Task lock, a command atomically replaces `task.json` first and then appends the corresponding event. A crash in that narrow gap can leave current state newer than the history; `recover` reconciles attempt completion idempotently without duplicating terminal events. Event sequence numbers are unique and gap-free for the events that were durably appended.
 
-Jobs are detached and survive your session. Retention is configurable in `subagents.conf`: terminal Task history is kept for `OPENCODE_SUBAGENT_RETENTION_DAYS` (default 90), while its bulky provider streams (`raw.jsonl`, `provider-progress.json`, git snapshots) are dropped after `OPENCODE_SUBAGENT_RAW_RETENTION_DAYS` (default 7). Active and unresolved Tasks are never pruned. Pruning runs on launch and does not inspect or remove sibling Claude/Codex state.
+Jobs are detached and survive your session. Retention is configurable in `subagents.conf`: terminal Task history is kept for `OPENCODE_SUBAGENT_RETENTION_DAYS` (default 90), while its bulky provider streams (`raw.jsonl`, `provider-progress.json`, `provider-baseline.json`, git snapshots) are dropped after `OPENCODE_SUBAGENT_RAW_RETENTION_DAYS` (default 7). Active and unresolved Tasks are never pruned. Pruning runs on launch and does not inspect or remove sibling Claude/Codex state.
 
 ## The worker agent
 
@@ -369,7 +373,8 @@ OPENCODE_SUBAGENT_RAW_RETENTION_DAYS=7
 
 ## Constraints
 
-- Requires `opencode` and `jq` on PATH — check with `scripts/install.sh --doctor`. A launch that fails before returning a Task id is an infrastructure failure (CLI missing, auth, crash); inspect the output rather than blind-retrying.
+- Requires `opencode` **2.x** and `jq` on PATH — check with `scripts/install.sh --doctor`, which flags an unsupported OpenCode. A launch that fails before returning a Task id is an infrastructure failure (CLI missing or too old, auth, crash); inspect the output rather than blind-retrying.
+- The worker runs as `opencode run --standalone`, a private OpenCode server owned by the attempt, so a timeout or `cancel` really stops the turn (through OpenCode's shared background service a turn outlives its killed client). The report, completion and cost come from `opencode session export`; the JSON event stream is the fallback. The worker starts in `--cwd` (or the current directory); a retry or resume continues in the directory its session was created in.
 - A hard timeout (default 30 min) guarantees no attempt runs forever.
 - Exit 0 only means the worker ran and reported. Task success is decided by your verification run and your acceptance.
 - Job directories from before the Task layout are still readable (`status <OLD_JOB_ID>` prints them, labelled `LEGACY JOB`) but are never reinterpreted as Tasks and never appear in `list`.

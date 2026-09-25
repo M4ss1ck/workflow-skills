@@ -24,6 +24,7 @@
 #   delegate.sh logs TASK [ATTEMPT] [--stream report|request|raw|stderr|progress|result|meta|changed]
 #   delegate.sh recover                         reconcile durable state after a crash
 #   delegate.sh policy [off|explicit|auto]
+#   delegate.sh help                            this text
 #
 # Routing native delegation (see scripts/routing.py):
 #   delegate.sh route hook|record|show|doctor|identity
@@ -45,7 +46,9 @@
 #
 # Exit codes: 0 finished  1 verification failed  2 usage/config  3 still running
 #             4 incomplete turn (resume it)  5 still running but stalled
-#             124 timeout  127 missing CLI  130 cancelled
+#             124 timeout  127 missing or unsupported CLI  130 cancelled
+#
+# Requires OpenCode 2.x (checked on every launch); 1.x is not supported.
 #
 # Legacy forms still accepted: `delegate.sh [opts] "<task>"` and `delegate.sh --wait TASK`.
 set -euo pipefail
@@ -143,6 +146,7 @@ op=""
 case "${1:-}" in
   start|run|retry|resume|status|wait|cancel|verify|decide|list|show|attempts|events|logs|recover|policy)
     op="$1"; shift ;;
+  help) usage; exit 0 ;;
 esac
 
 while [ "$#" -gt 0 ]; do
@@ -226,8 +230,9 @@ resolve_model() {
   [ -n "$model" ] || die "no worker model: pass --model provider/model, or save one with --model provider/model --save-default (conf: $conf_file)"
 }
 
-# --agent falls back to OpenCode's default agent with only a warning when the
-# name is unknown, so the definition has to be on disk before we launch.
+# OpenCode 2.x refuses an unknown --agent outright (1.x silently fell back to
+# its unconstrained default agent), so the definition has to be on disk before
+# we launch. 2.x still reads agents from ~/.config/opencode/agent/.
 ensure_agent() {
   [ -f "$agent_src" ] || die "worker agent definition missing: $agent_src"
   if [ ! -f "$agent_dest" ] || ! cmp -s "$agent_src" "$agent_dest"; then
@@ -249,7 +254,7 @@ prune_state() {
     state="$(json_read "${d}task.json" '.state')"
     case "$state" in accepted|rejected|cancelled|taken_over) ;; *) continue ;; esac
     find "${d}attempts" -mindepth 2 -maxdepth 2 -type f \
-      \( -name 'raw.jsonl' -o -name 'provider-progress.json' -o -name 'git-before.txt' -o -name 'git-after.txt' \) \
+      \( -name 'raw.jsonl' -o -name 'provider-progress.json' -o -name 'provider-baseline.json' -o -name 'git-before.txt' -o -name 'git-after.txt' \) \
       -mtime "+$raw_days" -delete 2>/dev/null || true
     if find "${d}task.json" -mtime "+$keep_days" -print -quit 2>/dev/null | grep -q .; then
       rm -rf "${d%/}"
@@ -270,75 +275,103 @@ print_watch() {
 }
 
 # ------------------------------------------------------- provider (OpenCode) IO
-# Everything below reads OpenCode's local database. It is an implementation
-# detail, not a stable interface: every query is best-effort and the caller
-# falls back to the CLI event stream when a query fails or the schema drifts.
+# OpenCode 2.x only. 1.x is not supported: its `opencode db` and `run --dir`
+# are gone in 2.x, and the 2.x event stream has no closing step_finish.
+#
+# The worker runs as `opencode run --standalone`: a private server inside the
+# runner's process group. Through the shared background service a turn keeps
+# running after its client is killed, so a timeout or cancel would stop only
+# the watcher and leave the worker editing the tree.
+#
+# Session state is read back with `opencode session export`, also standalone,
+# so the wrapper never starts or depends on the background service. The export
+# is the provider's own record: every query is best-effort and the caller falls
+# back to the CLI event stream when an export fails or its shape drifts.
 
-provider_db_available() {
-  local db_path
-  db_path="$(opencode db path 2>/dev/null | tail -1)"
-  [ -n "$db_path" ] && [ -f "$db_path" ]
+opencode_min_major=2
+
+opencode_version() {
+  opencode --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
 }
 
-sql_quote() {
-  local value="$1"
-  value="${value//\'/\'\'}"
-  printf "'%s'" "$value"
+# An unsupported CLI is infrastructure, not a worker outcome: refuse before a
+# Task exists rather than let it surface later as a silent no_report.
+require_supported_opencode() {
+  local version major
+  version="$(opencode_version)"
+  [ -n "$version" ] \
+    || die "could not read the OpenCode version from 'opencode --version'; this skill needs OpenCode $opencode_min_major.x — run scripts/install.sh --doctor" 127
+  major="${version%%.*}"
+  [ "$major" -ge "$opencode_min_major" ] \
+    || die "OpenCode $version is not supported: this skill needs OpenCode $opencode_min_major.x or newer (upgrade with: opencode upgrade)" 127
 }
 
-provider_final_id() {
-  local session_id="$1"
-  local session_sql
-  session_sql="$(sql_quote "$session_id")"
-  opencode db "SELECT id FROM message WHERE session_id=$session_sql AND json_extract(data, '$.role') = 'assistant' AND json_extract(data, '$.finish') = 'stop' ORDER BY time_created DESC LIMIT 1" --format json 2>/dev/null \
-    | jq -r '.[0].id // empty' 2>/dev/null
+# 2.x writes its first stream event only once the model starts answering, so a
+# slow first response would leave a cancelled attempt without a session id.
+# The session exists from launch, under the title build_cmd gave it.
+provider_session_by_title() {
+  opencode session list --standalone --format json -n 20 2>/dev/null \
+    | jq -r --arg t "$1" '[.[]? | select(.title? == $t) | .id? // empty] | first // empty' 2>/dev/null || true
 }
 
-provider_report() {
-  local session_id="$1"
-  local message_id="$2"
-  local session_sql message_sql
-  session_sql="$(sql_quote "$session_id")"
-  message_sql="$(sql_quote "$message_id")"
-  opencode db "SELECT json_extract(data, '$.text') AS text FROM part WHERE session_id=$session_sql AND message_id=$message_sql AND json_extract(data, '$.type') = 'text' ORDER BY time_created DESC LIMIT 1" --format json 2>/dev/null \
-    | jq -r '.[0].text // empty' 2>/dev/null
+provider_export() {
+  opencode session export --standalone "$1" 2>/dev/null
 }
 
-provider_cost() {
-  local session_id="$1"
-  local session_sql
-  session_sql="$(sql_quote "$session_id")"
-  opencode db "SELECT COALESCE(SUM(CAST(json_extract(data, '$.cost') AS REAL)), 0) AS cost FROM message WHERE session_id=$session_sql AND json_extract(data, '$.role') = 'assistant'" --format json 2>/dev/null \
-    | jq -r '.[0].cost // empty' 2>/dev/null
+# The assistant message ids a session already holds, so a resumed attempt can
+# tell its own turn from the ones before it.
+provider_baseline() {
+  local session="$1" out="$2" exported
+  exported="$(provider_export "$session")" || return 1
+  printf '%s' "$exported" | jq -c '[.messages[]? | .id? // empty]' >"$out.tmp" 2>/dev/null \
+    || { rm -f "$out.tmp"; return 1; }
+  mv "$out.tmp" "$out"
 }
 
-provider_latest_assistant_id() {
-  local session_id="$1"
-  local session_sql
-  session_sql="$(sql_quote "$session_id")"
-  opencode db "SELECT id FROM message WHERE session_id=$session_sql AND json_extract(data, '$.role') = 'assistant' ORDER BY time_created DESC LIMIT 1" --format json 2>/dev/null \
-    | jq -r '.[0].id // empty' 2>/dev/null
+# provider_turn EXPORT_FILE BASELINE_FILE -> one JSON object describing the
+# messages this attempt added:
+#   verdict  final (last assistant finished with "stop") | incomplete (it never
+#            finished, or stopped between tool steps / on an error) | unknown
+#            (a finish value this wrapper does not know: drift, not proof) |
+#            none (no assistant message yet)
+#   idle     OpenCode recorded the session idle after that message
+#   report   the text of that message; cost  the sum over the new messages
+provider_turn() {
+  jq -c --slurpfile base "$2" '
+    ($base[0] // []) as $b
+    | [.messages[]? | select((.id? // "") as $id | any($b[]; . == $id) | not)] as $new
+    | ([$new | to_entries[] | select(.value.type? == "assistant")] | last) as $last
+    | ($last.value.finish? // "") as $finish
+    | {
+        verdict: (if $last == null then "none"
+                  elif $finish == "stop" then "final"
+                  elif ($finish == "" or $finish == "tool-calls" or $finish == "error") then "incomplete"
+                  else "unknown" end),
+        finish: (if $finish == "" then null else $finish end),
+        idle: ($last != null and any($new | to_entries[]; .key > $last.key and .value.type? == "idle")),
+        report: (if $last == null then ""
+                 else [$last.value.content[]? | select(.type? == "text") | .text? // empty] | join("\n\n") end),
+        cost: ([$new[] | select(.type? == "assistant") | .cost? // empty | numbers] | if length == 0 then null else add end)
+      }' "$1" 2>/dev/null
 }
 
-provider_assistant_finish() {
-  local session_id="$1"
-  local message_id="$2"
-  local session_sql message_sql
-  session_sql="$(sql_quote "$session_id")"
-  message_sql="$(sql_quote "$message_id")"
-  opencode db "SELECT json_extract(data, '$.finish') AS finish FROM message WHERE session_id=$session_sql AND id=$message_sql LIMIT 1" --format json 2>/dev/null \
-    | jq -r '.[0].finish // empty' 2>/dev/null
-}
-
+# provider-progress.json: the newest 100 things the session recorded, newest
+# first, one row per message content item. time_created is the provider's own
+# timestamp (ms), which is what liveness reads; the file is replaced only on
+# change, so its mtime means "the worker did something", not "the poller ran".
 snapshot_provider_progress() {
-  local dir="$1"
-  local session_id="$2"
-  local session_sql
+  local dir="$1" export_file="$2"
   local tmp="$dir/provider-progress.json.tmp"
-  session_sql="$(sql_quote "$session_id")"
-  if opencode db "SELECT time_created, message_id, json_extract(data, '$.type') AS type, json_extract(data, '$.tool') AS tool, json_extract(data, '$.state.status') AS status, substr(json_extract(data, '$.text'), 1, 2000) AS text FROM part WHERE session_id=$session_sql ORDER BY time_created DESC LIMIT 100" --format json >"$tmp" 2>/dev/null; then
-    # Replace only on change, so the file's mtime means "the worker did
-    # something" rather than "the poller ran".
+  if jq -c '
+      [.messages[]? as $m
+       | (if (($m.content? // []) | length) == 0 then [{}] else $m.content end)[]
+       | {time_created: (.time.completed? // .time.ran? // .time.created? // $m.time.completed? // $m.time.created? // null),
+          message_id: $m.id,
+          type: (.type? // $m.type),
+          tool: (.name? // null),
+          status: (.state.status? // null),
+          text: ((.text? // (if $m.type == "user" then $m.text? else null end)) | if type == "string" then .[0:2000] else null end)}]
+      | sort_by(.time_created // 0) | reverse | .[0:100]' "$export_file" >"$tmp" 2>/dev/null; then
     if cmp -s "$tmp" "$dir/provider-progress.json"; then
       rm -f "$tmp"
     else
@@ -349,24 +382,39 @@ snapshot_provider_progress() {
   fi
 }
 
+# The last line of a live stream is routinely half-written: parse line by line
+# and skip what does not parse.
+stream_events() {
+  jq -cR 'fromjson? // empty' "$1" 2>/dev/null || true
+}
+
 stream_session() {
-  local raw_jsonl="$1"
-  jq -rs '[.[] | .sessionID? // empty] | first // empty' "$raw_jsonl" 2>/dev/null || true
+  stream_events "$1" | jq -rs '[.[] | .sessionID? // empty | select(. != "")] | first // empty' 2>/dev/null || true
 }
 
-# A CLI-stream report is trusted only when the same invocation emitted a
-# step_finish after it. This is the provider-final fallback when database
-# inspection is unavailable or drifts.
+# The 2.x stream emits step_start / text / tool_use per step and a step_finish
+# only between tool steps, never after the closing text. So the CLI-stream
+# report is the text of the last step, trusted only when that step ran no tool
+# and hit no error. This is the fallback when the export is unavailable.
 stream_final_report() {
-  jq -rs '
-    ([to_entries[] | select(.value.type? == "step_finish") | .key] | last) as $finish
-    | if $finish == null then empty
-      else ([to_entries[] | select(.key < $finish and .value.type? == "text") | .value.part.text? // empty] | if length == 0 then empty else add end)
-      end' "$1" 2>/dev/null || true
+  stream_events "$1" | jq -rs '
+    ([to_entries[] | select(.value.type? == "step_start") | .key] | last // -1) as $s
+    | .[($s + 1):] as $step
+    | if any($step[]; .type? == "tool_use" or .type? == "error") then empty
+      else ([$step[] | select(.type? == "text") | .part.text? // empty] | if length == 0 then empty else add end)
+      end' 2>/dev/null || true
 }
 
-stream_finished() {
-  jq -e -s 'any(.[]; .type? == "step_finish")' "$1" >/dev/null 2>&1
+# .part.cost is per step, not cumulative. 2.x reports it only for tool steps,
+# so this under-counts a finished turn: the export's per-message costs win.
+stream_cost() {
+  stream_events "$1" | jq -rs '[.[] | select(.type? == "step_finish") | .part.cost? // empty | numbers]
+                              | if length == 0 then empty else add end' 2>/dev/null || true
+}
+
+# Provider errors arrive in the stream in 2.x, not on stderr.
+stream_errors() {
+  stream_events "$1" | jq -r 'select(.type? == "error") | .error.message? // .error.data.message? // (.error | tostring)' 2>/dev/null || true
 }
 
 # ------------------------------------------------------------------ changed files
@@ -389,10 +437,18 @@ record_changed_files() {
 
 # --------------------------------------------------------------------- runner
 
+# 2.x has no --dir: a new session takes the client's working directory (the
+# runner cds into the Task's tree first), and a resumed session keeps the
+# directory it was created in.
+# A new session is titled after its Task and Attempt, which also makes it
+# findable before the stream's first event (see provider_session_by_title).
 build_cmd() {
-  cmd=(opencode run --format json --agent "$agent_name" --model "$model")
-  if [ -n "$cwd" ]; then cmd+=(--dir "$cwd"); fi
-  if [ -n "$resume" ]; then cmd+=(--session "$resume"); fi
+  cmd=(opencode run --standalone --format json --agent "$agent_name" --model "$model")
+  if [ -n "$resume" ]; then
+    cmd+=(--session "$resume")
+  else
+    cmd+=(--title "$session_title")
+  fi
 }
 
 run_with_timeout() {
@@ -409,11 +465,12 @@ do_run() {
   tdir="$(cd "$dir/../.." && pwd)"
   attempt="$(basename "$dir")"
   work="${cwd:-$PWD}"
-  local session cost report final_id db_report db_cost assistant_id assistant_finish
-  local baseline_final_id="" baseline_assistant_id=""
-  local baseline_final_ready=0 baseline_assistant_ready=0
-  local runner_pid="" provider_complete=0 exit_code db_available=0 announced_session=0
-  local transport worker class action
+  local session="" cost report turn verdict turn_report turn_cost
+  local baseline="$dir/provider-baseline.json" export_file="$dir/provider-export.json.tmp"
+  local baseline_ready=0 runner_pid="" provider_complete=0 exit_code announced_session=0
+  local work_ok=1 raw_size last_size=-1 tick=0
+  local transport worker class action session_title
+  session_title="$agent_name $(basename "$tdir")/$attempt"
   printf '%s\n' "${BASHPID:-$$}" >"$dir/pid"
   persist_process_identity "$dir/process.json" "${BASHPID:-$$}"
 
@@ -433,10 +490,18 @@ do_run() {
   trap stop_provider TERM INT
 
   build_cmd
-  if provider_db_available; then db_available=1; fi
-  if [ "$db_available" -eq 1 ] && [ -n "$resume" ]; then
-    if baseline_final_id="$(provider_final_id "$resume")"; then baseline_final_ready=1; fi
-    if baseline_assistant_id="$(provider_latest_assistant_id "$resume")"; then baseline_assistant_ready=1; fi
+  # The runner is its own detached process: entering the tree here is how a
+  # new 2.x session learns its directory.
+  cd "$work" 2>/dev/null || work_ok=0
+
+  # A fresh session holds nothing before this attempt. A resumed one needs its
+  # prior messages recorded first, or an earlier turn's final answer would read
+  # as this attempt's.
+  if [ -z "$resume" ]; then
+    echo '[]' >"$baseline"
+    baseline_ready=1
+  elif [ "$work_ok" -eq 1 ] && provider_baseline "$resume" "$baseline"; then
+    baseline_ready=1
   fi
 
   # Publish the session as soon as it exists: a supervisor that cancels or
@@ -457,8 +522,21 @@ do_run() {
     lock_release
   }
 
+  # Export, snapshot progress, and describe this attempt's turn. Fails when the
+  # export does, leaving the caller on the stream alone.
+  read_turn() {
+    provider_export "$1" >"$export_file" || { rm -f "$export_file"; return 1; }
+    snapshot_provider_progress "$dir" "$export_file"
+    turn="$(provider_turn "$export_file" "$baseline")"
+    rm -f "$export_file"
+    [ -n "$turn" ]
+  }
+
   set +e
-  if [ "$db_available" -eq 1 ] && command -v setsid >/dev/null 2>&1; then
+  if [ "$work_ok" -eq 0 ]; then
+    printf 'ERROR: working tree not found or not accessible: %s\n' "$work" >"$dir/stderr.log"
+    exit_code=1
+  elif command -v setsid >/dev/null 2>&1; then
     if command -v timeout >/dev/null 2>&1; then
       setsid timeout "$hard_timeout" "${cmd[@]}" "$spec" >"$dir/raw.jsonl" 2>"$dir/stderr.log" &
     else
@@ -470,25 +548,34 @@ do_run() {
     session="$resume"
     if [ -n "$session" ]; then announce_session "$session"; fi
 
+    # Each export boots a private server, so read one when the stream moved,
+    # and otherwise every sixth poll: often enough to catch a final answer
+    # whose CLI never exits, cheap enough to leave running for half an hour.
     while kill -0 "$runner_pid" 2>/dev/null; do
       if [ -z "$session" ]; then
         session="$(stream_session "$dir/raw.jsonl")"
+        [ -n "$session" ] || session="$(provider_session_by_title "$session_title")"
         if [ -n "$session" ]; then announce_session "$session"; fi
       fi
-      if [ -n "$session" ]; then
-        snapshot_provider_progress "$dir" "$session"
-        if final_id="$(provider_final_id "$session")" \
-          && [ -n "$final_id" ] \
-          && { [ -z "$resume" ] || { [ "$baseline_final_ready" -eq 1 ] && [ "$final_id" != "$baseline_final_id" ]; }; } \
-          && db_report="$(provider_report "$session" "$final_id")"; then
-          printf '%s\n' "$db_report" >"$dir/worker-report.txt"
-          provider_complete=1
-          kill -TERM -- "-$runner_pid" 2>/dev/null || true
-          wait "$runner_pid" 2>/dev/null
-          break
+      if [ -n "$session" ] && [ "$baseline_ready" -eq 1 ]; then
+        raw_size="$(wc -c <"$dir/raw.jsonl" 2>/dev/null || echo 0)"
+        tick=$((tick + 1))
+        if [ "$raw_size" != "$last_size" ] || [ "$tick" -ge 6 ]; then
+          last_size="$raw_size"
+          tick=0
+          if read_turn "$session" \
+            && [ "$(jq -r '.verdict' <<<"$turn")" = "final" ] \
+            && [ "$(jq -r '.idle' <<<"$turn")" = "true" ]; then
+            provider_complete=1
+            kill -TERM -- "-$runner_pid" 2>/dev/null || true
+            wait "$runner_pid" 2>/dev/null
+            break
+          fi
         fi
       fi
-      sleep "$poll_interval"
+      # Until the session is known a cancel has nothing to resume from: look
+      # again soon rather than after a full poll interval.
+      if [ -z "$session" ] && [ "$poll_interval" -gt 1 ] 2>/dev/null; then sleep 1; else sleep "$poll_interval"; fi
     done
 
     if [ "$provider_complete" -eq 1 ]; then
@@ -508,38 +595,43 @@ do_run() {
   set -e
   runner_pid=""
 
-  session="${resume:-$(stream_session "$dir/raw.jsonl")}"
+  if [ -n "$resume" ]; then session="$resume"; fi
+  [ -n "${session:-}" ] || session="$(stream_session "$dir/raw.jsonl")"
+  [ -n "$session" ] || [ "$work_ok" -eq 0 ] || session="$(provider_session_by_title "$session_title")"
   [ -z "$session" ] || announce_session "$session"
-  # .part.cost is per step, not cumulative: the attempt cost is their sum.
-  cost="$(jq -rs '[.[] | select(.type? == "step_finish") | .part.cost? // empty] | if length == 0 then empty else add end' "$dir/raw.jsonl" 2>/dev/null || true)"
+  cost="$(stream_cost "$dir/raw.jsonl")"
   report="$(stream_final_report "$dir/raw.jsonl")"
+  local stream_done=0
+  [ -z "$report" ] || stream_done=1
 
-  if [ "$db_available" -eq 1 ] && [ -n "$session" ]; then
-    snapshot_provider_progress "$dir" "$session"
-    if final_id="$(provider_final_id "$session")"; then
-      if [ -n "$final_id" ] \
-        && { [ -z "$resume" ] || { [ "$baseline_final_ready" -eq 1 ] && [ "$final_id" != "$baseline_final_id" ]; }; }; then
-        if db_report="$(provider_report "$session" "$final_id")" && [ -n "$db_report" ]; then report="$db_report"; fi
-        if [ -z "$cost" ] && db_cost="$(provider_cost "$session")" && [ -n "$db_cost" ]; then cost="$db_cost"; fi
-      elif [ "$exit_code" -eq 0 ] \
-        && assistant_id="$(provider_latest_assistant_id "$session")" \
-        && [ -n "$assistant_id" ] \
-        && { [ -z "$resume" ] || { [ "$baseline_assistant_ready" -eq 1 ] && [ "$assistant_id" != "$baseline_assistant_id" ]; }; } \
-        && assistant_finish="$(provider_assistant_finish "$session" "$assistant_id")" \
-        && [ -z "$assistant_finish" ]; then
-        exit_code=4
-        report="${report}"$'\n\n'"ERROR: OpenCode exited before producing a provider-final response. Resume this session."
-      fi
-    fi
+  # The export is the provider's own record of how the turn ended: it wins
+  # over the stream whenever it can be read and was baselined.
+  if [ -n "$session" ] && [ "$baseline_ready" -eq 1 ] && read_turn "$session"; then
+    verdict="$(jq -r '.verdict' <<<"$turn")"
+    turn_report="$(jq -r '.report' <<<"$turn")"
+    turn_cost="$(jq -r '.cost // empty' <<<"$turn")"
+    [ -z "$turn_cost" ] || cost="$turn_cost"
+    case "$verdict" in
+      final)
+        provider_complete=1
+        [ -z "$turn_report" ] || report="$turn_report"
+        ;;
+      incomplete)
+        if [ "$exit_code" -eq 0 ]; then
+          exit_code=4
+          report="${report}"$'\n\n'"ERROR: OpenCode exited before producing a provider-final response. Resume this session."
+        fi
+        ;;
+    esac
   fi
 
-  if [ "$exit_code" -eq 0 ] && [ "$provider_complete" -eq 0 ] && ! stream_finished "$dir/raw.jsonl"; then
+  if [ "$exit_code" -eq 0 ] && [ "$provider_complete" -eq 0 ] && [ "$stream_done" -eq 0 ]; then
     exit_code=4
     report="${report}"$'\n\n'"ERROR: OpenCode exited before producing a provider-final response. Resume this session."
   fi
 
   if [ -z "$report" ]; then
-    report="$(tail -c 2000 "$dir/stderr.log"; tail -c 2000 "$dir/raw.jsonl")"
+    report="$(stream_errors "$dir/raw.jsonl"; tail -c 2000 "$dir/stderr.log"; tail -c 2000 "$dir/raw.jsonl")"
   fi
   printf '%s\n' "$report" >"$dir/worker-report.txt"
   record_changed_files "$dir" "$work"
@@ -552,7 +644,9 @@ do_run() {
     *)   transport="failed" ;;
   esac
   worker="$(parse_worker_report "$dir/worker-report.txt" | jq -r '.worker')"
-  IFS='|' read -r class action <<<"$(classify_attempt "$exit_code" "$worker" "$session" "$dir/stderr.log")"
+  stream_errors "$dir/raw.jsonl" >"$dir/provider-errors.log"
+  [ -s "$dir/provider-errors.log" ] || rm -f "$dir/provider-errors.log"
+  IFS='|' read -r class action <<<"$(classify_attempt "$exit_code" "$worker" "$session" "$dir/stderr.log" "$dir/provider-errors.log")"
 
   lock_acquire "$tdir"
   if [ ! -f "$dir/result.json" ]; then
@@ -624,8 +718,7 @@ attempt_running() {
 # The most recent thing the worker actually did, for the one-line RUNNING
 # report. Prefers the provider's own rows; falls back to the CLI stream.
 attempt_partial_cost() {
-  jq -rs '[.[] | select(.type? == "step_finish") | .part.cost? // empty]
-          | if length == 0 then empty else add end' "$1/raw.jsonl" 2>/dev/null || true
+  stream_cost "$1/raw.jsonl"
 }
 
 attempt_activity() {
@@ -673,6 +766,17 @@ do_status() {
   require_task "${positionals[0]:-$wait_job}" || legacy_emit
   note_awaiting_tasks
   emit_status
+}
+
+provider_process_alive() {
+  local pid
+  pid="$(attempt_provider_pid "$1")"
+  [ -n "$pid" ] || return 0
+  if [ -f "$1/provider-process.json" ]; then
+    process_identity_alive "$1/provider-process.json" "$pid"
+  else
+    kill -0 "$pid" 2>/dev/null
+  fi
 }
 
 # A provider error event in the stream. Read with grep, not jq: the last line of
@@ -729,7 +833,12 @@ do_wait() {
     # attempt, and a cached directory would report a dead stream forever.
     current="$(json_read "$task_dir/task.json" '.current_attempt')"
     adir="$task_dir/attempts/$current"
-    if attempt_stream_error "$adir"; then wait_returned="provider_error"; break; fi
+    # A 2.x client that is killed (timeout, cancel) writes a transport error
+    # as it dies. Once the provider is gone the runner is only finalizing:
+    # keep waiting for its result instead of reporting a live error.
+    if attempt_stream_error "$adir" && provider_process_alive "$adir"; then
+      wait_returned="provider_error"; break
+    fi
     if [ "$no_stall_return" -eq 0 ]; then
       idle="$(attempt_liveness "$adir" | jq -r '.idle_seconds // empty')"
       case "$idle" in
@@ -817,6 +926,7 @@ preflight() {
     || die "opencode not found on PATH — run scripts/install.sh --doctor" 127
   command -v jq >/dev/null 2>&1 \
     || die "jq not found on PATH (required to parse output) — run scripts/install.sh --doctor" 127
+  require_supported_opencode
   if [ "$save_default" -eq 1 ]; then
     [ -n "$model" ] || die "--save-default requires --model"
     conf_set "$model_key" "$model"
@@ -829,6 +939,14 @@ preflight() {
   ensure_agent
   mkdir -p "$state_root"
   prune_state
+}
+
+# The worker is started by cd-ing into its tree, and retries run from wherever
+# the supervisor happens to be: record the tree as an absolute path.
+resolve_cwd() {
+  [ -n "$cwd" ] || return 0
+  [ -d "$cwd" ] || die "working tree not found: $cwd"
+  cwd="$(cd "$cwd" && pwd)"
 }
 
 task_title() {
@@ -876,6 +994,7 @@ note_awaiting_tasks() {
 do_launch() {
   [ -n "$spec" ] || die "missing task spec"
   preflight
+  resolve_cwd
 
   task_id="task_$(date +%Y%m%d-%H%M%S)-$RANDOM"
   task_dir="$state_root/$task_id"
@@ -914,6 +1033,7 @@ do_retry() {
   prev="$(json_read "$task_dir/task.json" '.current_attempt')"
   index=$(( $(json_read "$task_dir/task.json" '.attempt_count') + 1 ))
   cwd="${cwd:-$(json_read "$task_dir/task.json" '.cwd')}"
+  resolve_cwd
   session="$(json_read "$task_dir/task.json" '.session_id // ""')"
   [ "$session" != "null" ] || session=""
   if [ "$new_session" -eq 1 ]; then session=""; fi
