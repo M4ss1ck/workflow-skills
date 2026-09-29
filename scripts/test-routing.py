@@ -771,6 +771,16 @@ class Entrypoint(Env):
         self.assertEqual(report["command"]["status"], "match")
         self.assertEqual(report["hosts"]["claude"]["status"], "active-observed")
 
+    def test_doctor_detects_installed_hook_shim(self):
+        home = os.path.join(self.tmp, "shim-home")
+        os.makedirs(os.path.join(home, ".codex"))
+        with open(os.path.join(home, ".codex", "hooks.json"), "w") as f:
+            json.dump({"hooks": {"PreToolUse": [{"hooks": [{"type": "command",
+                "command": "/usr/bin/bash /x/route-hook-shim.sh /x/delegate.sh codex # workflow-skills-routing"}]}]}}, f)
+        out = self.run_route(["route", "doctor", "--json"], env_extra={"HOME": home})
+        report = json.loads(out.stdout)
+        self.assertEqual(report["hosts"]["codex"]["status"], "installed-unverified")
+
 
 PLUGIN_HOOKS = {"hooks.json": ("CLAUDE_PLUGIN_ROOT", "claude"), "codex-hooks.json": ("PLUGIN_ROOT", "codex")}
 

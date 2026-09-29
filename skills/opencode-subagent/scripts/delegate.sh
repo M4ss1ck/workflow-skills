@@ -764,7 +764,6 @@ emit_status() {
 
 do_status() {
   require_task "${positionals[0]:-$wait_job}" || legacy_emit
-  note_awaiting_tasks
   emit_status
 }
 
@@ -984,11 +983,16 @@ warn_shared_tree() {
 # looking. Say so on stderr, scoped to this tree, so it cannot break --json and
 # cannot nag about unrelated repos.
 note_awaiting_tasks() {
-  local pending count
-  pending="$(tasks_awaiting_in_tree "$(worktree_key "${cwd:-$PWD}")" | paste -sd, - || true)"
+  local pending count shown
+  pending="$(tasks_awaiting_in_tree "$(worktree_key "${cwd:-$PWD}")")"
   [ -n "$pending" ] || return 0
-  count="$(printf '%s\n' "$pending" | tr ',' '\n' | wc -l | tr -d ' ')"
-  echo "NOTE: $count Task(s) in this worktree await your decision: $pending" >&2
+  count="$(printf '%s\n' "$pending" | wc -l | tr -d ' ')"
+  shown="$(printf '%s\n' "$pending" | sed -n '1,3p' | paste -sd, -)"
+  if [ "$count" -gt 3 ]; then
+    echo "NOTE: $count Task(s) in this worktree await your decision: $shown, … (+$((count - 3)) more; delegate.sh list --active)" >&2
+  else
+    echo "NOTE: $count Task(s) in this worktree await your decision: $shown" >&2
+  fi
 }
 
 do_launch() {

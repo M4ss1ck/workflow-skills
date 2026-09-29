@@ -810,7 +810,9 @@ def host_registrations(home):
                 text = f.read()
         except OSError:
             return
-        if "route hook" in text:
+        # Local installs invoke the router through route-hook-shim.sh. Plugin
+        # registrations still call `route hook` directly.
+        if "route hook" in text or ("route-hook-shim.sh" in text and "workflow-skills-routing" in text):
             found[host].append({"source": label, "path": path, "mtime": os.path.getmtime(path)})
 
     scan(os.path.join(home, ".claude", "settings.json"), "claude", "local")

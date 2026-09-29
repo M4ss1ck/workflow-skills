@@ -364,6 +364,14 @@ bad="$(STUB_DIR="$stub_dir" bash -c '
 ')"
 echo "$bad" | jq -e '.worker == "no_report"' >/dev/null \
   || fail "opencode: multiple STATUS values were trusted: $bad"
+printf '```text\nSTATUS: DONE\nFILES_CHANGED:\n- none\nVERIFICATION:\nnot needed\nQUESTION:\n- none\nCONCERNS:\n- none\n```\n' >"$stub_dir/bad-report.txt"
+bad="$(STUB_DIR="$stub_dir" bash -c '
+  state_root=/dev/null; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  parse_worker_report "'"$stub_dir"'/bad-report.txt"
+')"
+echo "$bad" | jq -e '.worker == "done" and .worker_files_changed == [] and .worker_concerns == null and .worker_question == null' >/dev/null \
+  || fail "opencode: fenced report polluted parsed fields: $bad"
 
 # a DONE worker is not an accepted task
 jq -e '.state == "awaiting_supervisor" and .outcome.supervisor == "pending"' "$td/task.json" >/dev/null \
@@ -1272,6 +1280,23 @@ note_task="$(cd "$note_repo" && run_delegate "$oc" run --json "undecided task" |
 err="$(cd "$note_repo" && run_delegate "$oc" list 2>&1 >/dev/null)"
 echo "$err" | grep -q "$note_task" || fail "opencode: no note about the undecided Task in its own tree: $err"
 echo "$err" | grep -q '^NOTE: 1 Task' || fail "opencode: the note miscounts pending Tasks: $err"
+
+# A backlog stays visible without dumping every Task id on each invocation.
+for n in 1 2 3 4 5 6; do
+  synthetic="$stub_dir/state/workflow-skills/subagents/task_00000000-000000-$n"
+  mkdir -p "$synthetic"
+  jq --arg id "task_00000000-000000-$n" '.task_id = $id' "$(taskdir_of "$note_task")/task.json" >"$synthetic/task.json"
+done
+err="$(cd "$note_repo" && run_delegate "$oc" list 2>&1 >/dev/null)"
+echo "$err" | grep -q '^NOTE: 7 Task' || fail "opencode: backlog note miscounts Tasks: $err"
+echo "$err" | grep -q '+4 more; delegate.sh list --active' || fail "opencode: backlog note lacks the lookup command: $err"
+[ "$(printf '%s' "$err" | wc -c)" -lt 250 ] || fail "opencode: backlog note prints too many Task ids: $err"
+for n in 1 2 3 4 5 6; do
+  rm -r "$stub_dir/state/workflow-skills/subagents/task_00000000-000000-$n"
+done
+
+err="$(cd "$note_repo" && run_delegate "$oc" status "$note_task" 2>&1 >/dev/null)"
+[ -z "$err" ] || fail "opencode: status repeated a backlog note: $err"
 
 # a different tree must not be nagged about it
 err="$(cd "$other_repo" && run_delegate "$oc" list 2>&1 >/dev/null)"

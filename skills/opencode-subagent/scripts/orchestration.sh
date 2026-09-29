@@ -291,6 +291,9 @@ report_section() {
           next
         }
       }
+      # Markdown fences sometimes wrap the entire final report. They are
+      # presentation, not section content.
+      if (line ~ /^[[:space:]]*```[[:alnum:]_-]*[[:space:]]*$/) next
       if (found && cur == want) { buf = (buf == "" ? line : buf "\n" line) }
     }
     END { if (found) print buf }
@@ -313,6 +316,9 @@ parse_worker_report() {
   verification="$(report_section "$file" VERIFICATION)"
   concerns="$(report_section "$file" CONCERNS)"
   question="$(report_section "$file" QUESTION)"
+  [ "$(printf '%s' "$files" | tr '[:upper:]' '[:lower:]')" != none ] || files=""
+  [ "$(printf '%s' "$concerns" | tr '[:upper:]' '[:lower:]')" != '- none' ] || concerns=""
+  [ "$status" = "blocked" ] || question=""
   if [ "$status" = "blocked" ] && [ -z "$question" ]; then question="$concerns"; fi
   jq -n \
     --arg worker "$status" \
