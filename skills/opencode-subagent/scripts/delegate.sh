@@ -22,7 +22,7 @@
 #   delegate.sh attempts TASK
 #   delegate.sh events TASK
 #   delegate.sh logs TASK [ATTEMPT] [--stream report|request|raw|stderr|progress|result|meta|changed]
-#   delegate.sh recover                         reconcile durable state after a crash
+#   delegate.sh recover [--reports-only]        reconcile crashes and restore saved final reports
 #   delegate.sh policy [off|explicit|auto]
 #   delegate.sh help                            this text
 #
@@ -42,6 +42,7 @@
 #   --no-stall-return        block for the full poll timeout even if it looks stalled
 #   --save-default           persist --model as the configured worker model
 #   --full                   print the worker report in full, untruncated
+#   --reports-only           recover saved final reports without crash reconciliation
 #   --json                   machine-readable output
 #
 # Exit codes: 0 finished  1 verification failed  2 usage/config  3 still running
@@ -108,6 +109,7 @@ new_session=0
 only_active=0
 limit=20
 keep_task=0
+reports_only=0
 skip_decision=0
 task_id=""
 task_dir=""
@@ -170,6 +172,7 @@ while [ "$#" -gt 0 ]; do
     --active)       only_active=1 ;;
     --all)          only_active=0 ;;
     --keep-task)    keep_task=1 ;;
+    --reports-only) reports_only=1 ;;
     --json)         json_out=1 ;;
     --__run)        shift; runner_attemptdir="${1:?internal flag requires an attempt dir}" ;;
     -h|--help)      usage; exit 0 ;;
@@ -372,10 +375,40 @@ snapshot_provider_progress() {
           status: (.state.status? // null),
           text: ((.text? // (if $m.type == "user" then $m.text? else null end)) | if type == "string" then .[0:2000] else null end)}]
       | sort_by(.time_created // 0) | reverse | .[0:100]' "$export_file" >"$tmp" 2>/dev/null; then
+    # Some live 2.x exports contain no messages until the CLI exits. Keep the
+    # stream-derived snapshot in that case instead of replacing it with [].
+    if [ "$(jq 'length' "$tmp")" -eq 0 ] && [ -s "$dir/provider-progress.json" ] \
+      && [ "$(jq 'length' "$dir/provider-progress.json")" -gt 0 ]; then
+      rm -f "$tmp"
+      return 0
+    fi
     if cmp -s "$tmp" "$dir/provider-progress.json"; then
       rm -f "$tmp"
     else
       mv "$tmp" "$dir/provider-progress.json"
+    fi
+  else
+    rm -f "$tmp"
+  fi
+}
+
+# The JSONL stream is available even when the session export is empty during a
+# long turn. Keep its latest events in the same shape as export progress.
+snapshot_stream_progress() {
+  local dir="$1" raw="$2" tmp="$1/provider-progress.json.tmp"
+  [ -s "$raw" ] || return 0
+  if tail -n 200 "$raw" | jq -cR 'fromjson? // empty' | jq -cs '
+      [.[] | {time_created: (.timestamp // null),
+             message_id: (.part.messageID? // null),
+             type: (.part.type? // .type),
+             tool: (.part.tool? // null),
+             status: (.part.state.status? // null),
+             text: (if (.part.text? | type) == "string" then .part.text[0:2000] else null end)}]
+      | sort_by(.time_created // 0) | reverse | .[0:100]' >"$tmp" 2>/dev/null; then
+    if [ "$(jq 'length' "$tmp")" -gt 0 ]; then
+      if cmp -s "$tmp" "$dir/provider-progress.json"; then rm -f "$tmp"; else mv "$tmp" "$dir/provider-progress.json"; fi
+    else
+      rm -f "$tmp"
     fi
   else
     rm -f "$tmp"
@@ -563,6 +596,7 @@ do_run() {
         if [ "$raw_size" != "$last_size" ] || [ "$tick" -ge 6 ]; then
           last_size="$raw_size"
           tick=0
+          snapshot_stream_progress "$dir" "$dir/raw.jsonl"
           if read_turn "$session" \
             && [ "$(jq -r '.verdict' <<<"$turn")" = "final" ] \
             && [ "$(jq -r '.idle' <<<"$turn")" = "true" ]; then
@@ -614,16 +648,39 @@ do_run() {
     case "$verdict" in
       final)
         provider_complete=1
-        [ -z "$turn_report" ] || report="$turn_report"
-        ;;
-      incomplete)
-        if [ "$exit_code" -eq 0 ]; then
-          exit_code=4
-          report="${report}"$'\n\n'"ERROR: OpenCode exited before producing a provider-final response. Resume this session."
+        if [ -n "$turn_report" ] && { ! printf '%s\n' "$report" | grep -Eq '^[[:space:]]*STATUS:[[:space:]]*(DONE|DONE_WITH_CONCERNS|BLOCKED)[[:space:]]*$' \
+          || printf '%s\n' "$turn_report" | grep -Eq '^[[:space:]]*STATUS:[[:space:]]*(DONE|DONE_WITH_CONCERNS|BLOCKED)[[:space:]]*$'; }; then
+          report="$turn_report"
         fi
         ;;
     esac
   fi
+
+  # The CLI process can exit just before its last JSONL write becomes visible.
+  # Give a successful turn a short bounded chance to publish its STATUS block.
+  if [ "$exit_code" -eq 0 ] && ! printf '%s\n' "$report" \
+    | grep -Eq '^[[:space:]]*STATUS:[[:space:]]*(DONE|DONE_WITH_CONCERNS|BLOCKED)[[:space:]]*$'; then
+    for _ in {1..15}; do
+      sleep 0.2
+      turn_report="$(stream_final_report "$dir/raw.jsonl")"
+      if printf '%s\n' "$turn_report" \
+        | grep -Eq '^[[:space:]]*STATUS:[[:space:]]*(DONE|DONE_WITH_CONCERNS|BLOCKED)[[:space:]]*$'; then
+        report="$turn_report"
+        stream_done=1
+        break
+      fi
+    done
+    if [ "$stream_done" -eq 0 ] && [ -n "$session" ] && [ "$baseline_ready" -eq 1 ] && read_turn "$session"; then
+      turn_report="$(jq -r '.report' <<<"$turn")"
+      if printf '%s\n' "$turn_report" \
+        | grep -Eq '^[[:space:]]*STATUS:[[:space:]]*(DONE|DONE_WITH_CONCERNS|BLOCKED)[[:space:]]*$'; then
+        report="$turn_report"
+        provider_complete=1
+      fi
+    fi
+  fi
+
+  snapshot_stream_progress "$dir" "$dir/raw.jsonl"
 
   if [ "$exit_code" -eq 0 ] && [ "$provider_complete" -eq 0 ] && [ "$stream_done" -eq 0 ]; then
     exit_code=4
@@ -1411,12 +1468,96 @@ do_logs() {
   cat "$task_dir/attempts/$attempt/$file"
 }
 
+# Recover a valid final STATUS block that reached raw.jsonl after the runner
+# had already saved no_report. Preserve the supervisor's later disposition and
+# verification; only the worker result and its derived Task fields change.
+sync_recovered_result() {
+  local dir="$1" attempt="$2" worker="$3"
+  task_update "$dir" '
+    .outcome.worker = $worker
+    | .failure_class = (if $worker == "blocked" then "worker_blocked" else null end)
+    | if .state == "awaiting_supervisor" then
+        .recommended_action = (if $worker == "blocked" then "supervisor_decision" else "verify" end)
+        | .outcome.supervisor = (if $worker == "blocked" then "decision_required" else "pending" end)
+      else . end' --arg worker "$worker"
+  if ! jq -e --arg attempt "$attempt" 'select(.type == "result_recovered" and .attempt == $attempt)' \
+    "$dir/events.jsonl" >/dev/null 2>&1; then
+    event_append "$dir" result_recovered \
+      "$(jq -c -n --arg attempt "$attempt" --arg worker "$worker" \
+        '{attempt: $attempt, source: "raw_final_stream", old_worker: "no_report", worker: $worker}')"
+  fi
+}
+
+recover_final_report() {
+  local dir="$1" attempt adir raw report parsed worker result_worker tmp
+  attempt="$(json_read "$dir/task.json" '.current_attempt')"
+  [ -n "$attempt" ] && [ "$attempt" != null ] || return 1
+  adir="$dir/attempts/$attempt"
+  raw="$adir/raw.jsonl"
+  [ -f "$adir/result.json" ] || return 1
+  [ "$(json_read "$adir/result.json" '.transport')" = finished ] || return 1
+  [ "$(json_read "$adir/result.json" '.authoritative')" = true ] || return 1
+  result_worker="$(json_read "$adir/result.json" '.worker')"
+  if [ "$result_worker" != no_report ]; then
+    [ "$(json_read "$adir/result.json" '.recovered_from_stream')" = true ] || return 1
+    if [ "$(json_read "$dir/task.json" '.outcome.worker')" = "$result_worker" ] \
+      && jq -e --arg attempt "$attempt" 'select(.type == "result_recovered" and .attempt == $attempt)' \
+        "$dir/events.jsonl" >/dev/null 2>&1; then return 1; fi
+    lock_acquire "$dir"
+    sync_recovered_result "$dir" "$attempt" "$result_worker"
+    lock_release
+    echo report_recovered
+    return 0
+  fi
+  [ "$result_worker" = no_report ] || return 1
+  [ "$(json_read "$dir/task.json" '.outcome.worker')" = no_report ] || return 1
+  [ -s "$raw" ] || return 1
+
+  report="$(stream_final_report "$raw")"
+  [ -n "$report" ] || return 1
+  tmp="$adir/recovered-report.$$.tmp"
+  printf '%s\n' "$report" >"$tmp"
+  parsed="$(parse_worker_report "$tmp")"
+  worker="$(jq -r .worker <<<"$parsed")"
+  case "$worker" in done|done_with_concerns|blocked) ;; *) rm -f "$tmp"; return 1 ;; esac
+
+  lock_acquire "$dir"
+  # A concurrent supervisor may have retried or cancelled while we parsed.
+  if [ "$(json_read "$dir/task.json" '.current_attempt')" != "$attempt" ] \
+    || [ "$(json_read "$adir/result.json" '.worker')" != no_report ]; then
+    lock_release
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$adir/worker-report.txt"
+  jq --argjson parsed "$parsed" --arg report "$report" '
+    def normalize_reported_path:
+      gsub("`"; "") | sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "")
+      | sub("^\\./"; "") | sub("[[:space:]]*\\(.*$"; "")
+      | sub("[[:space:]]+[-\u2014\u2013][[:space:]].*$"; "")
+      | sub("[[:space:]]+$"; "");
+    . + $parsed
+    | .report = ($report + "\n")
+    | .recovered_from_stream = true
+    | .failure_class = (if $parsed.worker == "blocked" then "worker_blocked" else null end)
+    | .recommended_action = (if $parsed.worker == "blocked" then "supervisor_decision" else "verify" end)
+    | (.worker_files_changed | map(normalize_reported_path) | map(select(length > 0 and (test("[[:space:]]") | not)))) as $claimed
+    | .worker_attributed_files = (.changed_files | map(select(. as $f | $claimed | index($f))))
+    | .unattributed_files = (.changed_files - .worker_attributed_files)' "$adir/result.json" \
+    | write_atomic "$adir/result.json"
+  sync_recovered_result "$dir" "$attempt" "$worker"
+  lock_release
+  echo report_recovered
+}
+
 do_recover() {
-  local d id out results=()
+  local d id out repaired results=()
   for d in "$state_root"/task_*/; do
     [ -f "${d}task.json" ] || continue
     id="$(basename "${d%/}")"
-    out="$(reconcile_task "${d%/}")"
+    if [ "$reports_only" -eq 1 ]; then out=unchanged; else out="$(reconcile_task "${d%/}")"; fi
+    repaired="$(recover_final_report "${d%/}" || true)"
+    [ -z "$repaired" ] || out="${out}+${repaired}"
     results+=("$(jq -c -n --arg id "$id" --arg finding "$out" \
       --arg state "$(task_state "${d%/}")" \
       --arg attempt "$(json_read "${d}task.json" '.current_attempt')" \

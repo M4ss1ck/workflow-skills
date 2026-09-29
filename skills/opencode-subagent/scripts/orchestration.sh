@@ -302,10 +302,12 @@ report_section() {
 
 # parse_worker_report REPORT_FILE -> JSON {worker, files_changed, verification, concerns, question}
 parse_worker_report() {
-  local file="$1" raw status files verification concerns question status_count
+  local file="$1" raw status files verification concerns question status_count status_variants
   status_count="$(awk '/^[[:space:]]*STATUS:[[:space:]]*/ { n++ } END { print n + 0 }' "$file" 2>/dev/null || echo 0)"
+  status_variants="$(sed -n 's/^[[:space:]]*STATUS:[[:space:]]*//p' "$file" \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:lower:]' '[:upper:]' | sort -u | wc -l | tr -d ' ')"
   raw="$(report_section "$file" STATUS | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:lower:]' '[:upper:]')"
-  if [ "$status_count" -ne 1 ]; then raw=""; fi
+  if [ "$status_count" -eq 0 ] || [ "$status_variants" -ne 1 ]; then raw=""; fi
   case "$raw" in
     DONE_WITH_CONCERNS) status="done_with_concerns" ;;
     DONE)               status="done" ;;

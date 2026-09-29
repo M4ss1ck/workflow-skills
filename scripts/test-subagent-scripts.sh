@@ -31,6 +31,7 @@ run_delegate() {
   STUB_STEPS="${STUB_STEPS:-1}" \
   STUB_FILES="${STUB_FILES:-- foo.txt}" \
   STUB_FINISH_DRIFT="${STUB_FINISH_DRIFT:-0}" \
+  STUB_LATE_FINAL="${STUB_LATE_FINAL:-0}" \
   STUB_STATUS="${STUB_STATUS:-DONE}" \
   XDG_STATE_HOME="$stub_dir/state" \
   XDG_CONFIG_HOME="$stub_dir/config" \
@@ -166,6 +167,17 @@ if [ "${STUB_NO_FINAL:-0}" = "1" ]; then
   # the turn stopped after a tool call, with nothing after it
   event tool_use '{"type":"tool","tool":"glob","state":{"status":"completed"}}'
   msg a assistant tool-calls "" glob 0.0042
+  exit 0
+fi
+if [ "${STUB_LATE_FINAL:-0}" = "1" ]; then
+  event text '{"type":"text","text":"Still working."}'
+  (
+    sleep 3
+    event step_start '{"type":"step-start"}'
+    event text "$(jq -c -n --arg t "$(worker_report)" '{type: "text", text: $t}')"
+    msg a assistant stop "$(worker_report)" "" 0.0042
+    msg i idle
+  ) &
   exit 0
 fi
 event text "$(jq -c -n --arg t "$(worker_report)" '{type: "text", text: $t}')"
@@ -364,6 +376,14 @@ bad="$(STUB_DIR="$stub_dir" bash -c '
 ')"
 echo "$bad" | jq -e '.worker == "no_report"' >/dev/null \
   || fail "opencode: multiple STATUS values were trusted: $bad"
+printf 'STATUS: DONE\nFILES_CHANGED:\n- old.txt\nSTATUS: DONE\nFILES_CHANGED:\n- final.txt\nVERIFICATION:\npass\nCONCERNS:\n- none\n' >"$stub_dir/bad-report.txt"
+bad="$(STUB_DIR="$stub_dir" bash -c '
+  state_root=/dev/null; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  parse_worker_report "'"$stub_dir"'/bad-report.txt"
+')"
+echo "$bad" | jq -e '.worker == "done" and .worker_files_changed == ["final.txt"]' >/dev/null \
+  || fail "opencode: repeated identical STATUS blocks did not use the last report: $bad"
 printf '```text\nSTATUS: DONE\nFILES_CHANGED:\n- none\nVERIFICATION:\nnot needed\nQUESTION:\n- none\nCONCERNS:\n- none\n```\n' >"$stub_dir/bad-report.txt"
 bad="$(STUB_DIR="$stub_dir" bash -c '
   state_root=/dev/null; agent_name=workflow-worker
@@ -892,6 +912,25 @@ echo "$res" | grep -q 'stub check -> pass' || fail "opencode: export failure los
 jq -e '.outcome.transport == "finished"' "$(taskdir_of "$task")/task.json" >/dev/null \
   || fail "opencode: export failure stranded running status"
 
+# A real 2.x client may exit before its final JSONL write reaches the file.
+# The old runner stored earlier progress text as no_report while the final
+# STATUS block arrived after the runner had finalized.
+out="$(STUB_LATE_FINAL=1 STUB_EXPORT_FAIL=1 run_delegate "$oc" run --json "late final stream")"
+echo "$out" | jq -e '.outcome.worker == "done" and (.report | contains("STATUS: DONE"))' >/dev/null \
+  || fail "opencode: a late final stream write was recorded as no_report: $out"
+
+# Export can remain empty during a live turn. Stream events still carry useful
+# tool activity and timestamps for the progress file and stall calculation.
+out="$(STUB_EXPORT_FAIL=1 STUB_SLEEP=4 run_delegate "$oc" start "stream progress fallback")"
+task="$(task_of "$out")"
+for _ in 1 2 3; do
+  if jq -e 'length > 0' "$(taskdir_of "$task")/attempts/attempt_001/provider-progress.json" >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+jq -e 'length > 0 and .[0].time_created != null' "$(taskdir_of "$task")/attempts/attempt_001/provider-progress.json" >/dev/null \
+  || fail "opencode: live stream activity was absent from provider-progress.json"
+STUB_EXPORT_FAIL=1 run_delegate "$oc" wait "$task" --poll-timeout 30 >/dev/null
+
 # an unknown provider finish value is schema drift, not proof of incompleteness
 out="$(STUB_FINISH_DRIFT=1 run_delegate "$oc" "finish drift")"
 task="$(task_of "$out")"
@@ -1367,5 +1406,37 @@ run_delegate "$oc" status opencode-20200101-120000 --json | jq -e '.legacy == tr
   || fail "opencode: legacy job not flagged in JSON"
 run_delegate "$oc" list --json | jq -e 'map(select(.task_id == "opencode-20200101-120000")) | length == 0' >/dev/null \
   || fail "opencode: legacy job listed as a Task"
+
+# A historical attempt can have a valid final stream but a saved no_report.
+# recover restores the worker result without changing an accepted decision.
+recovery_task="$(run_delegate "$oc" run --json "recover saved report" | jq -r .task_id)"
+recovery_dir="$(taskdir_of "$recovery_task")"
+run_delegate "$oc" decide "$recovery_task" accept --reason "fixture accepted" >/dev/null
+jq '.worker = "no_report" | .failure_class = "no_final_report" | .recommended_action = "resume_same_session" | .report = "old progress"' \
+  "$recovery_dir/attempts/attempt_001/result.json" >"$recovery_dir/attempts/attempt_001/result.json.tmp"
+mv "$recovery_dir/attempts/attempt_001/result.json.tmp" "$recovery_dir/attempts/attempt_001/result.json"
+jq '.outcome.worker = "no_report" | .failure_class = "no_final_report"' "$recovery_dir/task.json" >"$recovery_dir/task.json.tmp"
+mv "$recovery_dir/task.json.tmp" "$recovery_dir/task.json"
+run_delegate "$oc" recover --reports-only --json | jq -e --arg id "$recovery_task" \
+  'any(.[]; .task_id == $id and (.reconciliation | contains("report_recovered")))' >/dev/null \
+  || fail "opencode: recover did not find a saved final stream"
+jq -e '.state == "accepted" and .outcome.worker == "done" and .outcome.supervisor == "accepted"' \
+  "$recovery_dir/task.json" >/dev/null || fail "opencode: recover changed the supervisor decision"
+jq -e '.worker == "done" and (.report | contains("STATUS: DONE"))' \
+  "$recovery_dir/attempts/attempt_001/result.json" >/dev/null || fail "opencode: recover lost the final report"
+before_events="$(wc -l <"$recovery_dir/events.jsonl")"
+# Simulate a crash after result.json was written but before Task and event sync.
+jq '.outcome.worker = "no_report"' "$recovery_dir/task.json" >"$recovery_dir/task.json.tmp"
+mv "$recovery_dir/task.json.tmp" "$recovery_dir/task.json"
+jq -c 'select(.type != "result_recovered")' "$recovery_dir/events.jsonl" >"$recovery_dir/events.jsonl.tmp"
+mv "$recovery_dir/events.jsonl.tmp" "$recovery_dir/events.jsonl"
+run_delegate "$oc" recover --reports-only --json >/dev/null
+jq -e '.state == "accepted" and .outcome.worker == "done"' "$recovery_dir/task.json" >/dev/null \
+  || fail "opencode: recover did not finish an interrupted report repair"
+[ "$(wc -l <"$recovery_dir/events.jsonl")" -eq "$before_events" ] \
+  || fail "opencode: recover did not restore one result_recovered event"
+run_delegate "$oc" recover --reports-only --json >/dev/null
+[ "$(wc -l <"$recovery_dir/events.jsonl")" -eq "$before_events" ] \
+  || fail "opencode: repeated recover duplicated result_recovered"
 
 echo "Subagent script tests passed."
