@@ -54,19 +54,18 @@ Run the verification the task specified (tests, typecheck, lint, build) and repo
 
 ## Report format
 
-End your turn with exactly this block and nothing after it:
+End your turn with these labels as plain text, without Markdown code fences or
+extra text:
 
-```
 STATUS: DONE | DONE_WITH_CONCERNS | BLOCKED
 FILES_CHANGED:
 - path/one
-- path/two
 VERIFICATION:
 <command run> -> <pass/fail + the essential output>
-QUESTION:
-<only when BLOCKED: the decision the supervisor must make>
 CONCERNS:
 - <anything the supervisor must know, or "none">
-```
 
 The labels are parsed mechanically, so keep them exactly as written, at the start of their own line. Keep the report short. The supervisor reads the diff and re-runs the verification itself; your report is evidence, not acceptance.
+Use `- none` under FILES_CHANGED when no file changed. Use `- none` under
+CONCERNS when there is no concern. For `STATUS: BLOCKED`, insert a `QUESTION:`
+line before `CONCERNS:` and state the decision the supervisor must make.

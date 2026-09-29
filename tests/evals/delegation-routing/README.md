@@ -11,13 +11,14 @@ Each run is isolated: its own XDG state and config, `opencode-delegate` pointing
 
 Grading is deterministic. Native starts come from the host's own counters, and denials and routes come from the routing audit log. A `critical` scenario fails on any forbidden native start. More than 3 denials counts as a denial loop.
 
-## Recorded results (Claude Code 2.1.270, 2026-09-17)
+## Recorded results
 
 | File | Runtime | Runs | Result |
 |------|---------|------|--------|
 | `results/20260917-085325-claude.json` | before the second critic round | 15 (control, OpenCode assignment, native pressure, generic delegation, policy off; 3 each) | 15/15, 0 forbidden native starts in 12 critical runs |
 | `results/20260917-085357-claude.json` | same | 1 (misleading research label, diagnostic) | recorded as `opencode`, no native start |
 | `results/20260917-085708-claude.json` | final | 6 (control, policy off; 3 each) | 6/6 |
+| `results/20260929-073117-claude.json` | Claude Code 2.1.280, current v2 fixes | 6 (all scenarios; 1 each) | 6/6, 0 forbidden native starts in 4 critical runs |
 
 What these runs do not show:
 

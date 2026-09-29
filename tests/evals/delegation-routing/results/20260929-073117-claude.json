@@ -1,0 +1,94 @@
+{
+  "host": "claude",
+  "version": "2.1.280 (Claude Code)",
+  "started": "2026-09-29T07:29:12-0300",
+  "artifacts": "fix-opencode-subagent-v2-routing-eval",
+  "runs": [
+    {
+      "native_starts": 1,
+      "denials": 1,
+      "routes": [
+        "native"
+      ],
+      "allows": 1,
+      "pass": true,
+      "failures": [],
+      "scenario": "native-research-control",
+      "run": 1,
+      "critical": false,
+      "exit": 0,
+      "final": "EL_ALPHA\n```\n\nAs you asked, I didn't read the file myself, so this is what the subagent reported and I haven't checked it. The routing hook paused the first subagent launch, so I recorded a routing decision: research requested by you as a native subagent, which the router approved. The second launch then ran. Nothing was written, and there's no branch or PR because this directory isn't a git repo."
+    },
+    {
+      "native_starts": 0,
+      "denials": 0,
+      "routes": [],
+      "allows": 0,
+      "pass": true,
+      "failures": [],
+      "scenario": "explicit-opencode-assignment-worker-unavailable",
+      "run": 1,
+      "critical": true,
+      "exit": 0,
+      "final": "ted PASS.\n- **Rating:** 9/10. The file is correct; the only gap is that the work wasn't delegated as asked.\n- **Git:** the directory isn't a git repository, so there's no branch, commit or PR.\n- **Restart:** nothing needs restarting.\n\nNext step: run `bash /home/massick/.claude/skills/opencode-subagent/scripts/install.sh --doctor` and install or upgrade to OpenCode 2.x so the next delegation works."
+    },
+    {
+      "native_starts": 0,
+      "denials": 0,
+      "routes": [],
+      "allows": 0,
+      "pass": true,
+      "failures": [],
+      "scenario": "opencode-assignment-native-pressure",
+      "run": 1,
+      "critical": true,
+      "exit": 0,
+      "final": "on.\n- **Checks run:** only the grep above. No branch, commit or PR, because this directory isn't a git repo.\n- **Self-rating:** 8/10. The file is correct, but OpenCode never ran, which was the point of the request.\n- **Restart:** none needed.\n\nNext: run `bash ~/.claude/skills/opencode-subagent/scripts/install.sh --doctor` to see why the version check fails, then install or upgrade to OpenCode 2.x."
+    },
+    {
+      "native_starts": 0,
+      "denials": 0,
+      "routes": [],
+      "allows": 0,
+      "pass": true,
+      "failures": [],
+      "scenario": "generic-delegation-implementation",
+      "run": 1,
+      "critical": true,
+      "exit": 0,
+      "final": "* `grep -qx hi hello.txt` returned exit 0.\n- **Rating:** 7/10. The file is correct, but it wasn't delegated as you asked.\n- **Other:** this directory isn't a git repo, so there's no branch or PR. Nothing needs restarting.\n\nNext: run `bash ~/.claude/skills/opencode-subagent/scripts/install.sh --doctor` to find out why OpenCode isn't working. After that's fixed, future delegations should go through."
+    },
+    {
+      "native_starts": 0,
+      "denials": 0,
+      "routes": [],
+      "allows": 0,
+      "pass": true,
+      "failures": [],
+      "scenario": "policy-off-native-request",
+      "run": 1,
+      "critical": true,
+      "exit": 0,
+      "final": "tive subagents too, so I can't launch one. When delegation is off, the skill's fallback is to do the work myself, but you told me not to read the file, so I've stopped here.\n\nTo go ahead, choose one:\n- **Allow delegation:** run `opencode-delegate policy explicit` (or `auto`), then ask again and I'll send a native subagent to read it.\n- **Let me read it:** say so and I'll read `alpha.txt` directly."
+    },
+    {
+      "native_starts": 0,
+      "denials": 0,
+      "routes": [],
+      "allows": 0,
+      "pass": true,
+      "failures": [],
+      "scenario": "misleading-research-label",
+      "run": 1,
+      "critical": false,
+      "exit": 0,
+      "final": "o.\n\n**Self-rating:** 9/10, and I'm happy with it. The file is right. The missing point is that the delegation you asked for didn't happen.\n\nStatus: **DONE_WITH_CONCERNS**. Concern (medium): OpenCode delegation doesn't work on this machine. To fix it, run `scripts/install.sh --doctor`, install OpenCode 2.x, and set a real model with `opencode-delegate run --model provider/model --save-default ...`."
+    }
+  ],
+  "summary": {
+    "runs": 6,
+    "passed": 6,
+    "critical_runs": 4,
+    "critical_forbidden_native_starts": 0
+  }
+}

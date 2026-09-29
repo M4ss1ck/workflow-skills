@@ -11,7 +11,7 @@
 #     verifications/ver_NNN.{json,stdout,stderr}
 #     attempts/attempt_NNN/
 #       request.md               the exact text sent to the worker
-#       meta.json                launch inputs (model, cwd, session, retry_of, reason)
+#       meta.json                launch inputs (OpenCode version, model, cwd, session, retry_of, reason)
 #       result.json              transport + worker outcome, written when the run ends
 #       raw.jsonl stderr.log provider-progress.json provider-baseline.json
 #       provider-errors.log worker-report.txt
@@ -291,6 +291,9 @@ report_section() {
           next
         }
       }
+      # Markdown fences sometimes wrap the entire final report. They are
+      # presentation, not section content.
+      if (line ~ /^[[:space:]]*```[[:alnum:]_-]*[[:space:]]*$/) next
       if (found && cur == want) { buf = (buf == "" ? line : buf "\n" line) }
     }
     END { if (found) print buf }
@@ -299,10 +302,12 @@ report_section() {
 
 # parse_worker_report REPORT_FILE -> JSON {worker, files_changed, verification, concerns, question}
 parse_worker_report() {
-  local file="$1" raw status files verification concerns question status_count
+  local file="$1" raw status files verification concerns question status_count status_variants
   status_count="$(awk '/^[[:space:]]*STATUS:[[:space:]]*/ { n++ } END { print n + 0 }' "$file" 2>/dev/null || echo 0)"
+  status_variants="$(sed -n 's/^[[:space:]]*STATUS:[[:space:]]*//p' "$file" \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:lower:]' '[:upper:]' | sort -u | wc -l | tr -d ' ')"
   raw="$(report_section "$file" STATUS | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:lower:]' '[:upper:]')"
-  if [ "$status_count" -ne 1 ]; then raw=""; fi
+  if [ "$status_count" -eq 0 ] || [ "$status_variants" -ne 1 ]; then raw=""; fi
   case "$raw" in
     DONE_WITH_CONCERNS) status="done_with_concerns" ;;
     DONE)               status="done" ;;
@@ -313,6 +318,9 @@ parse_worker_report() {
   verification="$(report_section "$file" VERIFICATION)"
   concerns="$(report_section "$file" CONCERNS)"
   question="$(report_section "$file" QUESTION)"
+  [ "$(printf '%s' "$files" | tr '[:upper:]' '[:lower:]')" != none ] || files=""
+  [ "$(printf '%s' "$concerns" | tr '[:upper:]' '[:lower:]')" != '- none' ] || concerns=""
+  [ "$status" = "blocked" ] || question=""
   if [ "$status" = "blocked" ] && [ -z "$question" ]; then question="$concerns"; fi
   jq -n \
     --arg worker "$status" \
@@ -521,6 +529,7 @@ attempt_create() {
     --argjson index "$index" \
     --arg created "$(now_iso)" \
     --argjson started_epoch "$(now_epoch)" \
+    --arg opencode_version "$opencode_cli_version" \
     --arg model "$model" \
     --arg cwd "${cwd:-$PWD}" \
     --arg agent "$agent_name" \
@@ -536,6 +545,7 @@ attempt_create() {
       created_at: $created,
       started_at: $created,
       started_epoch: $started_epoch,
+      opencode_version: $opencode_version,
       model: $model,
       cwd: $cwd,
       agent: $agent,
@@ -566,7 +576,7 @@ attempt_register() {
     "$(jq -c -n --arg attempt "$id" --slurpfile meta "$task_dir/attempts/$id/meta.json" \
       '{attempt: $attempt, kind: $meta[0].kind, retry_of: $meta[0].retry_of,
         requested_session: $meta[0].requested_session, model: $meta[0].model,
-        reason: $meta[0].reason}')"
+        opencode_version: $meta[0].opencode_version, reason: $meta[0].reason}')"
   if [ "$own" -eq 1 ]; then lock_release; fi
 }
 

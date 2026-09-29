@@ -20,7 +20,9 @@ while IFS= read -r file; do
       status=1
       ;;
   esac
-done < <(find "$repo_root" -path "$repo_root/.git" -prune -o -name SKILL.md -type f -print)
+# Nested Git worktrees contain their own skills and a .git file. They are not
+# part of this checkout's installable skill inventory.
+done < <(find "$repo_root" -mindepth 1 -name .git -prune -o -type d -exec test -e '{}/.git' \; -prune -o -name SKILL.md -type f -print)
 
 found=0
 for dir in "$skills_dir"/*/; do

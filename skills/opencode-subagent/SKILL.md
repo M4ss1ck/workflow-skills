@@ -248,7 +248,7 @@ opencode-delegate show   TASK                   # task + attempts + verification
 opencode-delegate attempts TASK
 opencode-delegate events TASK
 opencode-delegate logs   TASK [ATTEMPT] [--stream report|request|raw|stderr|progress|result|meta|changed]
-opencode-delegate recover                       # reconcile state after a crash
+opencode-delegate recover [--reports-only]      # reconcile crashes and restore final reports from saved streams
 opencode-delegate policy [off|explicit|auto]
 opencode-delegate help                          # full command reference
 opencode-delegate route show [PROPOSAL]         # a denied native call and how to record it
@@ -260,7 +260,9 @@ Decisions: `accept` · `retry` · `reject` · `cancel` · `take_over` · `contin
 
 `status` and `wait` render the worker's parsed report — its verification, question and concerns — rather than the raw text, and cap a fallback report that is really provider JSONL. `--full` prints it verbatim; `--json` is never truncated.
 
-Options: `--model provider/model`, `--cwd DIR`, `--resume SESSION_ID`, `--new-session`, `--reason TEXT`, `--label TEXT`, `--timeout SECS` (default 1800), `--poll-timeout SECS`, `--stall-seconds SECS` (default 300), `--no-stall-return`, `--full`, `--save-default`, `--json`.
+If a completed Task was saved as `no_report` while its final `STATUS:` block is present in `raw.jsonl`, run `recover --reports-only`. It restores the parsed worker result and appends a `result_recovered` event while preserving the supervisor decision and verification. The default `recover` also reconciles interrupted attempts. Recovery is idempotent and leaves an incomplete or ambiguous final stream as `no_report`.
+
+Options: `--model provider/model`, `--cwd DIR`, `--resume SESSION_ID`, `--new-session`, `--reason TEXT`, `--label TEXT`, `--timeout SECS` (default 1800), `--poll-timeout SECS`, `--stall-seconds SECS` (default 300), `--no-stall-return`, `--reports-only` (with `recover`), `--full`, `--save-default`, `--json`.
 
 Exit codes: `0` finished · `1` verification failed · `2` usage/config or verification-execution error · `3` still running · `4` incomplete turn, resume the session · `5` still running but stalled · `124` timeout · `127` missing or unsupported CLI (OpenCode older than 2.x) · `130` cancelled.
 
@@ -332,7 +334,7 @@ events.jsonl       append-only history (task_created, attempt_started, session_d
 verifications/     ver_NNN.json + captured stdout/stderr
 attempts/attempt_NNN/
   request.md       the exact text sent to the worker
-  meta.json result.json worker-report.txt changed-files.txt
+  meta.json (including the exact `opencode_version`) result.json worker-report.txt changed-files.txt
   pid process.json provider.pid provider-process.json
   raw.jsonl stderr.log provider-progress.json provider-baseline.json
   provider-errors.log  (only when the OpenCode stream reported errors)
