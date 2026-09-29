@@ -334,7 +334,7 @@ events.jsonl       append-only history (task_created, attempt_started, session_d
 verifications/     ver_NNN.json + captured stdout/stderr
 attempts/attempt_NNN/
   request.md       the exact text sent to the worker
-  meta.json result.json worker-report.txt changed-files.txt
+  meta.json (including the exact `opencode_version`) result.json worker-report.txt changed-files.txt
   pid process.json provider.pid provider-process.json
   raw.jsonl stderr.log provider-progress.json provider-baseline.json
   provider-errors.log  (only when the OpenCode stream reported errors)

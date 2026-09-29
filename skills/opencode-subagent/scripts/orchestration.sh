@@ -11,7 +11,7 @@
 #     verifications/ver_NNN.{json,stdout,stderr}
 #     attempts/attempt_NNN/
 #       request.md               the exact text sent to the worker
-#       meta.json                launch inputs (model, cwd, session, retry_of, reason)
+#       meta.json                launch inputs (OpenCode version, model, cwd, session, retry_of, reason)
 #       result.json              transport + worker outcome, written when the run ends
 #       raw.jsonl stderr.log provider-progress.json provider-baseline.json
 #       provider-errors.log worker-report.txt
@@ -529,6 +529,7 @@ attempt_create() {
     --argjson index "$index" \
     --arg created "$(now_iso)" \
     --argjson started_epoch "$(now_epoch)" \
+    --arg opencode_version "$opencode_cli_version" \
     --arg model "$model" \
     --arg cwd "${cwd:-$PWD}" \
     --arg agent "$agent_name" \
@@ -544,6 +545,7 @@ attempt_create() {
       created_at: $created,
       started_at: $created,
       started_epoch: $started_epoch,
+      opencode_version: $opencode_version,
       model: $model,
       cwd: $cwd,
       agent: $agent,
@@ -574,7 +576,7 @@ attempt_register() {
     "$(jq -c -n --arg attempt "$id" --slurpfile meta "$task_dir/attempts/$id/meta.json" \
       '{attempt: $attempt, kind: $meta[0].kind, retry_of: $meta[0].retry_of,
         requested_session: $meta[0].requested_session, model: $meta[0].model,
-        reason: $meta[0].reason}')"
+        opencode_version: $meta[0].opencode_version, reason: $meta[0].reason}')"
   if [ "$own" -eq 1 ]; then lock_release; fi
 }
 

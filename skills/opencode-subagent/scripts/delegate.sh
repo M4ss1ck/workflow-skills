@@ -292,6 +292,7 @@ print_watch() {
 # back to the CLI event stream when an export fails or its shape drifts.
 
 opencode_min_major=2
+opencode_cli_version=""
 
 opencode_version() {
   opencode --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
@@ -307,6 +308,7 @@ require_supported_opencode() {
   major="${version%%.*}"
   [ "$major" -ge "$opencode_min_major" ] \
     || die "OpenCode $version is not supported: this skill needs OpenCode $opencode_min_major.x or newer (upgrade with: opencode upgrade)" 127
+  opencode_cli_version="$version"
 }
 
 # 2.x writes its first stream event only once the model starts answering, so a

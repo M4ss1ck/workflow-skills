@@ -325,9 +325,12 @@ grep -qx 'do the thing' "$td/attempts/attempt_001/request.md" \
 # the Task is created with its own durable state and an append-only history
 jq -e '.task_id == "'"$task"'" and .attempt_count == 1 and .current_attempt == "attempt_001"' \
   "$td/task.json" >/dev/null || fail "opencode: task.json wrong: $(cat "$td/task.json")"
+jq -e '.opencode_version == "2.0.16"' "$td/attempts/attempt_001/meta.json" >/dev/null \
+  || fail "opencode: exact CLI version was not persisted with the attempt"
 jq -e '.type == "task_created" and .seq == 1' <(head -1 "$td/events.jsonl") >/dev/null \
   || fail "opencode: first event is not task_created"
-grep -q '"type":"attempt_started"' "$td/events.jsonl" || fail "opencode: no attempt_started event"
+jq -e 'select(.type == "attempt_started") | .opencode_version == "2.0.16"' "$td/events.jsonl" >/dev/null \
+  || fail "opencode: attempt_started event omitted the exact CLI version"
 
 # the dedicated worker agent is installed where opencode can resolve it
 [ -f "$oc_agent" ] || fail "opencode: worker agent not synced to $oc_agent"
