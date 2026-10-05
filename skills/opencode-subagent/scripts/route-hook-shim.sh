@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Stable entry for locally registered routing hooks: route-hook-shim.sh ENTRY HOST
+# Stable entry for routing hooks: route-hook-shim.sh ENTRY HOST
 #
 # The installer copies this file to an owned location and registers it instead
-# of calling delegate.sh directly. The entry it wraps can change under the hook:
-# a symlink install follows whatever branch the checkout has switched to, and a
+# of calling delegate.sh directly; the plugin hook files call it from the plugin
+# root. The entry it wraps can change under the hook: a symlink install or a
+# local-path plugin follows whatever branch the checkout has switched to, and a
 # branch without routing makes delegate.sh exit 2, which Claude Code treats as
 # "block this user prompt". The shim turns every failure into a deny for
 # delegation calls only, and into silence (exit 0) for everything else.

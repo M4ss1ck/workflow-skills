@@ -813,9 +813,47 @@ class HooksConfig(unittest.TestCase):
                 for group in self.configs[name]["hooks"][event]:
                     for handler in group["hooks"]:
                         self.assertEqual(handler["type"], "command")
-                        self.assertEqual(handler["command"], f'bash "${{{var}}}/skills/opencode-subagent/scripts/delegate.sh" route hook --host {host}')
-        rel = "skills/opencode-subagent/scripts/delegate.sh"
-        self.assertTrue(os.path.isfile(os.path.join(REPO, rel)))
+                        self.assertEqual(handler["command"], f'bash "${{{var}}}/skills/opencode-subagent/scripts/route-hook-shim.sh" '
+                                                             f'"${{{var}}}/skills/opencode-subagent/scripts/delegate.sh" {host}')
+        for rel in ("skills/opencode-subagent/scripts/delegate.sh", "skills/opencode-subagent/scripts/route-hook-shim.sh"):
+            self.assertTrue(os.path.isfile(os.path.join(REPO, rel)), rel)
+
+    def test_plugin_commands_survive_a_broken_entry(self):
+        # A local-path plugin runs from the checkout. On a branch from before
+        # routing, delegate.sh exits 2 for `route hook`, and a raw exit 2 from
+        # UserPromptSubmit blocks every prompt. Through the shim the prompt
+        # passes and delegation is denied.
+        for name, (var, host) in PLUGIN_HOOKS.items():
+            handler = self.configs[name]["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+            root = tempfile.mkdtemp()
+            try:
+                scripts = os.path.join(root, "skills", "opencode-subagent", "scripts")
+                os.makedirs(scripts)
+                shutil.copy(os.path.join(SCRIPTS, "route-hook-shim.sh"), scripts)
+                with open(os.path.join(scripts, "delegate.sh"), "w") as f:
+                    f.write('echo "unknown command: $1" >&2\nexit 2\n')
+                env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")}
+                env.update({var: root, "XDG_STATE_HOME": root})
+                prompt = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "x", "prompt": "hi"})
+                out = subprocess.run(["sh", "-c", handler], input=prompt, capture_output=True, text=True, env=env, cwd="/")
+                self.assertEqual((out.returncode, out.stdout), (0, ""), (name, out.stderr))
+                self.assertTrue(os.path.exists(os.path.join(root, "workflow-skills", "routing", "capture-failed-any")), name)
+                payload = json.dumps({"hook_event_name": "PreToolUse", "session_id": "x", "tool_name": "Agent", "tool_input": {}})
+                out = subprocess.run(["sh", "-c", handler], input=payload, capture_output=True, text=True, env=env, cwd="/")
+                self.assertEqual(out.returncode, 0, name)
+                self.assertEqual(json.loads(out.stdout)["hookSpecificOutput"]["permissionDecision"], "deny", name)
+            finally:
+                shutil.rmtree(root)
+
+    def test_claude_manifest_does_not_pin_a_version(self):
+        # A pinned version keeps GitHub installs on the cached copy until the
+        # string changes, so new hooks never reach them. Without it Claude Code
+        # versions the plugin by commit.
+        with open(os.path.join(REPO, ".claude-plugin", "plugin.json")) as f:
+            self.assertNotIn("version", json.load(f))
+        with open(os.path.join(REPO, ".claude-plugin", "marketplace.json")) as f:
+            for plugin in json.load(f)["plugins"]:
+                self.assertNotIn("version", plugin)
 
     def test_plugin_commands_run_with_their_root_variable(self):
         for name, (var, host) in PLUGIN_HOOKS.items():
