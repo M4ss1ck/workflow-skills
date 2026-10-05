@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/skills/opencode-subagent/scripts/delegate.sh\" route hook --host claude",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/skills/opencode-subagent/scripts/route-hook-shim.sh\" \"${CLAUDE_PLUGIN_ROOT}/skills/opencode-subagent/scripts/delegate.sh\" claude",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/skills/opencode-subagent/scripts/delegate.sh\" route hook --host claude",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/skills/opencode-subagent/scripts/route-hook-shim.sh\" \"${CLAUDE_PLUGIN_ROOT}/skills/opencode-subagent/scripts/delegate.sh\" claude",
             "timeout": 10
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/skills/opencode-subagent/scripts/delegate.sh\" route hook --host claude",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/skills/opencode-subagent/scripts/route-hook-shim.sh\" \"${CLAUDE_PLUGIN_ROOT}/skills/opencode-subagent/scripts/delegate.sh\" claude",
             "timeout": 10
           }
         ]
