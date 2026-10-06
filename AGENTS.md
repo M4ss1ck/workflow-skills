@@ -34,6 +34,8 @@ The body holds the instructions the agent follows when the skill is active. Keep
 - A skill may ship OpenCode agent definitions in `skills/<name>/agents/*.md`. `scripts/install.sh --agent opencode` installs them into `~/.config/opencode/agent/`, and `opencode-subagent/scripts/delegate.sh` re-syncs its own before every launch. OpenCode 2.x refuses an unknown `--agent NAME` (1.x fell back to the unconstrained default agent), so the definition must be on disk before launching.
 - `opencode-subagent` supports OpenCode 2.x only (version-gated in `delegate.sh` preflight). It launches `opencode run --standalone` (no `--dir`: the runner `cd`s into the Task's tree), reads the session back with `opencode session export --standalone`, and falls back to the 2.x JSON stream, which has no `step_finish` after the closing text. Do not reintroduce `opencode db` or `--dir`; the test stub in `scripts/test-subagent-scripts.sh` models the 2.x CLI.
 
+- `context-watch` is a Claude Code `UserPromptSubmit` hook. Its one core is `skills/context-watch/scripts/context_watch.py`, reached only through `context-watch-shim.sh`, which always exits 0 (exit 2 from this event blocks the user's prompt). `plugins/context-watch/` is a second plugin in the same marketplace that ships the hook and nothing else. Its `scripts` is a symlink to the skill's scripts, which plugin installs copy through (verified on Claude Code 2.1.289). Keep the skill out of `plugins/`, or it loads twice. The installer registers it under the marker `workflow-skills-context-watch`, independent of the routing marker. Context size is the newest non-synthetic, non-sidechain assistant usage row. A newer `compact_boundary` means "just compacted": its `postTokens` counts only the summary, not the system prompt and tools, so it is never reported as the size. Ownership in `merge_hooks` is the trailing `# marker` comment, never a substring: a checkout path can contain either marker.
+
 ## Before you finish
 
 Run the linter — CI runs the same check:
@@ -67,6 +69,14 @@ Run the routing tests when changing `skills/opencode-subagent/scripts/routing.py
 ```bash
 python3 scripts/test-routing.py
 ```
+
+Run the context-watch tests when changing anything under `skills/context-watch/` or `plugins/context-watch/` (deterministic, under 1s):
+
+```bash
+python3 scripts/test-context-watch.py
+```
+
+`tests/evals/context-watch/run.py` is the paid behavioral eval: live Claude sessions checking that WARN never reaches the model, that URGE does, and that URGE does not cut a task short. Run it only deliberately.
 
 ## Planning artifacts
 

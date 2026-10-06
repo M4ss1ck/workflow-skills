@@ -11,11 +11,14 @@
 #   scripts/install.sh --list-agents
 #   scripts/install.sh --subagent-permissions  # also pre-authorize subagent delegation (consent)
 #   scripts/install.sh --doctor    # check for claude/codex/opencode/jq on PATH
-#   scripts/install.sh --no-hooks  # skip native delegation routing hooks (claude/codex)
-#   scripts/install.sh --remove-hooks --agent NAME  # remove only the routing hooks this installer added
+#   scripts/install.sh --no-hooks  # skip every hook: delegation routing and context-watch
+#   scripts/install.sh --no-context-watch  # skip only the context-watch hook (claude)
+#   scripts/install.sh --remove-hooks --agent NAME  # remove only the hooks this installer added
+#   scripts/install.sh --remove-context-watch  # remove only the context-watch hook
 #
 # Symlinks are the default so edits in this repo take effect immediately.
-# Selecting claude or codex also registers the delegation routing hooks.
+# Selecting claude or codex also registers the delegation routing hooks;
+# selecting claude also registers the context-watch hook.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,6 +30,7 @@ targets=()
 selected_targets=0
 selected_hosts=()
 hooks_mode="install"
+context_watch_mode="install"
 data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
 runtime_dir="$data_home/workflow-skills/opencode-subagent"
 runtime_marker=".installed-by-workflow-skills"
@@ -34,7 +38,7 @@ runtime_marker=".installed-by-workflow-skills"
 agent_names=(claude agents codex gemini antigravity opencode)
 
 usage() {
-  sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 list_agents() {
@@ -290,11 +294,12 @@ install_hook_shim() {
   mv "$hook_shim.tmp.$$" "$hook_shim"
 }
 
-plugin_registered() {
+plugin_registered() {  # HOST [PLUGIN]
+  local plugin="${2:-workflow-skills}"
   case "$1" in
     claude)
       [ -f "$HOME/.claude/plugins/installed_plugins.json" ] \
-        && grep -q '"workflow-skills@' "$HOME/.claude/plugins/installed_plugins.json" ;;
+        && grep -q "\"$plugin@" "$HOME/.claude/plugins/installed_plugins.json" ;;
     codex)
       [ -f "$HOME/.codex/config.toml" ] \
         && grep -q '^\[plugins\."workflow-skills@' "$HOME/.codex/config.toml" ;;
@@ -308,13 +313,16 @@ hooks_file_for() {
   esac
 }
 
+# merge_hooks HOST ACTION PYTHON [ENTRY [MARKER TEMPLATE SHIM]]: the last three
+# default to the routing hooks; context-watch passes its own.
 merge_hooks() {
   local host="$1" action="$2" python="$3" entry="${4:-}"
+  local marker="${5:-$hooks_marker}" template="${6:-$repo_root/hooks/hooks.json}" shim="${7:-$hook_shim}"
   local bash_path
   bash_path="$(command -v bash)"
-  "$python" - "$(hooks_file_for "$host")" "$action" "$host" "$hooks_marker" "$python" "$bash_path" "$entry" "$repo_root/hooks/hooks.json" "$hook_shim" <<'PY'
+  "$python" - "$(hooks_file_for "$host")" "$action" "$host" "$marker" "$python" "$bash_path" "$entry" "$template" "$shim" "$cw_marker" <<'PY'
 import json, os, shlex, stat, sys
-path, action, host, marker, python, bash, entry, template, shim = sys.argv[1:]
+path, action, host, marker, python, bash, entry, template, shim, cw_marker = sys.argv[1:]
 data = {}
 if os.path.exists(path):
     with open(path) as f:
@@ -324,7 +332,9 @@ removed = 0
 for event in list(hooks):
     groups = []
     for group in hooks[event]:
-        kept = [h for h in group.get("hooks", []) if marker not in h.get("command", "")]
+        # Own an entry only by its trailing "# marker" comment: the other marker,
+        # or this one, can appear anywhere in a checkout path inside a command.
+        kept = [h for h in group.get("hooks", []) if not h.get("command", "").rstrip().endswith("# " + marker)]
         removed += len(group.get("hooks", [])) - len(kept)
         if kept:
             groups.append(dict(group, hooks=kept))
@@ -335,8 +345,12 @@ for event in list(hooks):
 if action == "install":
     with open(template) as f:
         shipped = json.load(f)["hooks"]
-    command = (f"OPENCODE_DELEGATE_PYTHON={shlex.quote(python)} {shlex.quote(bash)} {shlex.quote(shim)} "
-               f"{shlex.quote(entry)} {host} # {marker}")
+    if marker == cw_marker:
+        command = (f"CONTEXT_WATCH_PYTHON={shlex.quote(python)} {shlex.quote(bash)} {shlex.quote(shim)} "
+                   f"{shlex.quote(entry)} # {marker}")
+    else:
+        command = (f"OPENCODE_DELEGATE_PYTHON={shlex.quote(python)} {shlex.quote(bash)} {shlex.quote(shim)} "
+                   f"{shlex.quote(entry)} {host} # {marker}")
     for event, groups in shipped.items():
         for group in groups:
             handlers = [dict(h, command=command) for h in group["hooks"]]
@@ -407,6 +421,67 @@ remove_hooks() {
   fi
 }
 
+# The context-watch hook (claude only). Same ownership scheme as the routing
+# hooks, under its own marker, so either can be installed or removed alone.
+# Symlink mode runs the checkout's core through an owned shim copy (the shim
+# turns a vanished checkout into silence); copy mode runs an owned core copy.
+cw_marker="workflow-skills-context-watch"
+cw_shim="$data_home/workflow-skills/context-watch-shim.sh"
+cw_runtime="$data_home/workflow-skills/context-watch"
+cw_template="$repo_root/plugins/context-watch/hooks/hooks.json"
+
+install_context_watch() {
+  local python entry result src="$skills_src/context-watch/scripts"
+  if [ "$hooks_mode" = "skip" ] || [ "$context_watch_mode" = "skip" ]; then
+    echo "hooks    claude: context-watch skipped; no context-size warnings"
+    return 0
+  fi
+  if plugin_registered claude context-watch; then
+    echo "hooks    claude: the context-watch plugin is installed and ships this hook; not adding a duplicate local registration"
+    remove_context_watch >/dev/null || true
+    return 0
+  fi
+  python="$(command -v python3 || true)"
+  if [ -z "$python" ]; then
+    echo "hooks    claude: context-watch NOT installed: python3 is required" >&2
+    return 0
+  fi
+  if [ ! -f "$src/context_watch.py" ] || [ ! -f "$cw_template" ]; then
+    echo "hooks    claude: context-watch NOT installed: $src or $cw_template is missing" >&2
+    return 0
+  fi
+  mkdir -p "$(dirname "$cw_shim")"
+  cp "$src/context-watch-shim.sh" "$cw_shim.tmp.$$"
+  chmod 755 "$cw_shim.tmp.$$"
+  mv "$cw_shim.tmp.$$" "$cw_shim"
+  if [ "$mode" = "copy" ]; then
+    mkdir -p "$cw_runtime"
+    cp "$src/context_watch.py" "$cw_runtime/context_watch.py.tmp.$$"
+    mv "$cw_runtime/context_watch.py.tmp.$$" "$cw_runtime/context_watch.py"
+    entry="$cw_runtime/context_watch.py"
+  else
+    rm -rf "$cw_runtime"                # a stale copy from an earlier --copy install
+    entry="$src/context_watch.py"
+  fi
+  result="$(merge_hooks claude install "$python" "$entry" "$cw_marker" "$cw_template" "$cw_shim")"
+  echo "hooks    claude: context-watch -> $(hooks_file_for claude) (replaced $result earlier entries)"
+  echo "hooks    claude: context-watch WARNS past 200k tokens and URGES past 400k; tune or disable in ${XDG_CONFIG_HOME:-~/.config}/workflow-skills/context-watch.conf, or re-run with --no-context-watch"
+}
+
+remove_context_watch() {
+  local python result
+  rm -rf "$cw_shim" "$cw_runtime"
+  python="$(command -v python3 || true)"
+  [ -n "$python" ] || { echo "hooks    claude: python3 is required to edit $(hooks_file_for claude)" >&2; return 1; }
+  [ -f "$(hooks_file_for claude)" ] || { echo "hooks    claude: no context-watch hook to remove"; return 0; }
+  result="$(merge_hooks claude remove "$python" "" "$cw_marker" "$cw_template" "$cw_shim")"
+  if [ "$result" = "none" ]; then
+    echo "hooks    claude: no context-watch hook to remove"
+  else
+    echo "hooks    claude: removed $result context-watch hook entries from $(hooks_file_for claude); start a new session"
+  fi
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent)
@@ -453,6 +528,12 @@ while [ "$#" -gt 0 ]; do
     --remove-hooks)
       hooks_mode="remove"
       ;;
+    --no-context-watch)
+      context_watch_mode="skip"
+      ;;
+    --remove-context-watch)
+      context_watch_mode="remove"
+      ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
   shift
@@ -462,10 +543,15 @@ if [ "$selected_targets" -eq 0 ]; then
   add_agent claude
 fi
 
-if [ "$hooks_mode" = "remove" ]; then
+if [ "$hooks_mode" = "remove" ] || [ "$context_watch_mode" = "remove" ]; then
   status=0
   for host in ${selected_hosts[@]+"${selected_hosts[@]}"}; do
-    case "$host" in claude|codex) remove_hooks "$host" || status=1 ;; esac
+    if [ "$hooks_mode" = "remove" ]; then
+      case "$host" in claude|codex) remove_hooks "$host" || status=1 ;; esac
+    fi
+    if [ "$host" = claude ]; then
+      remove_context_watch || status=1
+    fi
   done
   exit "$status"
 fi
@@ -528,6 +614,9 @@ for host in ${selected_hosts[@]+"${selected_hosts[@]}"}; do
     opencode) install_opencode_agents ;;
     claude|codex) install_hooks "$host"; enforcing=1 ;;
   esac
+  if [ "$host" = claude ]; then
+    install_context_watch
+  fi
 done
 if [ "$enforcing" -eq 0 ]; then
   echo "hooks    native delegation routing is enforced only for --agent claude or --agent codex; not available for these targets"

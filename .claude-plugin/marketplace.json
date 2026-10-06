@@ -12,6 +12,12 @@
       "source": "./",
       "description": "Personal collection of agent skills for day-to-day programming workflows.",
       "category": "development"
+    },
+    {
+      "name": "context-watch",
+      "source": "./plugins/context-watch",
+      "description": "Warns when a session's context passes 200k and 400k tokens, so you can /compact or /clear before cost and recall get worse.",
+      "category": "development"
     }
   ]
 }

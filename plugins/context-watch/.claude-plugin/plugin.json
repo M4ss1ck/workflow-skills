@@ -1,0 +1,8 @@
+{
+  "name": "context-watch",
+  "description": "Warns when a session's context passes 200k and 400k tokens, so you can /compact or /clear before cost and recall get worse.",
+  "author": {
+    "name": "massick",
+    "email": "4ndyraul@gmail.com"
+  }
+}

@@ -13,6 +13,7 @@ The `skills/` directory is the source of truth and follows the open `SKILL.md` l
 | [follow-plan](skills/follow-plan/SKILL.md) | Executes provided plans exactly, stopping for unresolved decisions instead of improvising or silently deviating. |
 | [opencode-subagent](skills/opencode-subagent/SKILL.md) | Delegate bounded, mechanically verifiable implementation work to a constrained OpenCode worker running a cheap model, then verify the result independently. Requires OpenCode 2.x (1.x is no longer supported). |
 | [propose-commit-message](skills/propose-commit-message/SKILL.md) | Proposes a Conventional Commits message for the current work (staged changes if any) without committing. Pairs with report-changes at the end of a task. |
+| [context-watch](skills/context-watch/SKILL.md) | Reports how large the current Claude Code session's context is. Its companion hook warns once the context passes 200k and 400k tokens (see [Context watch](#context-watch)). |
 
 ## Install
 
@@ -41,6 +42,7 @@ npx skills add . -g -a claude-code -a codex -a gemini-cli -a opencode --skill '*
 ```
 /plugin marketplace add https://github.com/M4ss1ck/workflow-skills.git
 /plugin install workflow-skills@workflow-skills
+/plugin install context-watch@workflow-skills    # optional: the context-size warning hook alone
 ```
 
 ### Codex plugin
@@ -62,8 +64,10 @@ scripts/install.sh --all            # every known target
 scripts/install.sh --copy           # copy instead of symlink
 scripts/install.sh --dir PATH       # custom skills directory
 scripts/install.sh --list-agents
-scripts/install.sh --no-hooks       # skip the delegation routing hooks
+scripts/install.sh --no-hooks       # skip every hook (delegation routing and context-watch)
+scripts/install.sh --no-context-watch               # skip only the context-watch hook
 scripts/install.sh --remove-hooks --agent claude   # remove only the hooks it added
+scripts/install.sh --remove-context-watch          # remove only the context-watch hook
 ```
 
 `--copy` installs one self-contained `opencode-subagent` runtime under `${XDG_DATA_HOME:-~/.local/share}/workflow-skills/`, so the `opencode-delegate` command and the hooks keep working after the clone is moved or deleted. Symlink mode runs the clone directly.
@@ -93,6 +97,21 @@ A consumed grant answers the host with `allow` plus the stored input. On Claude 
 
 Limits. The router checks that the recorded source words exist and that the record is consistent with the policy; it cannot check that the supervisor classified the work truthfully. For example, recording an OpenCode assignment's work under a new `--assignment` name, or quoting an unrelated later user message as the override, gets past the "OpenCode stays OpenCode" rule. It is a procedure guard, not a security boundary: an agent that can edit its hook or state files, or start another CLI from a shell, can get around it.
 
+## Context watch
+
+Every turn re-reads the whole context, so a long session costs more per turn and recalls less reliably. The `context-watch` hook (Claude Code, `UserPromptSubmit`) reads the session's newest usage row on every prompt:
+
+- **WARN, 200k by default:** a message to you only. Claude Code shows `systemMessage` in the UI and never sends it to the model.
+- **URGE, 400k by default:** the same message, plus one informational line to the model. It tells the model to keep working at full quality, mention the size once at a natural stop, and never compact or clear by itself.
+- **Frequency:** each threshold fires once per crossing, and URGE repeats every further 100k. A compaction, or a drop well below WARN, re-arms both. Small dips around a threshold do not re-fire it. Prompts nobody typed (`/loop` ticks, background-agent reports) also trigger it, so a crossing can be announced while you are away; the message stays in the session's history.
+- **Your call:** the message suggests `/compact`, or saving what matters and starting over with `/clear`. Nothing happens automatically.
+
+Thresholds are absolute because quality tracks absolute tokens, not the share of the window: Anthropic's Opus 4.6 system card shows the same 1M-window model dropping from 93 to 76-78 on MRCR v2 8-needle between the 128k-256k and 524k-1M bands. Claude Code's own warning on a 1M window only appears at about 947k. On a 200k-window model Claude Code auto-compacts at about 167k, before WARN, so those sessions rely on its built-in notice.
+
+Install it as its own plugin (`context-watch@workflow-skills`) or through `scripts/install.sh --agent claude`, which registers it by default under the marker `workflow-skills-context-watch`. The two hooks are independent: either can be installed or removed without the other. Configure it through `CONTEXT_WATCH_WARN`, `CONTEXT_WATCH_URGE` and `CONTEXT_WATCH_DISABLE`, set in the environment (or `settings.json` `env`) or in `~/.config/workflow-skills/context-watch.conf`; the environment wins. Subagent prompts are ignored. It is Claude Code only: the skill's `status` command reads Claude Code transcripts. Any failure is silent: the hook runs through a shim that always exits 0, so a broken install never blocks a prompt.
+
+Not on OpenCode yet: the OpenCode 2.x plugin API (`setup(api)`) has no stable prompt or context hooks. Upstream lists them as a future migration step.
+
 ## Adding a skill
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). In short: copy [templates/skill-template.md](templates/skill-template.md) into `skills/<name>/SKILL.md`, fill it in, and run `scripts/lint-skills.sh`.
@@ -107,9 +126,10 @@ skills/            one directory per skill, each with a SKILL.md
                    (optionally scripts/ and agents/ it references)
 templates/         skeleton for authoring new skills
 hooks/             routing hooks: hooks.json (Claude Code plugin), codex-hooks.json (Codex plugin)
+plugins/           standalone plugins: context-watch (its scripts/ links to skills/context-watch/scripts)
 scripts/           install.sh, lint-skills.sh, and their tests
 tests/routing/     sanitized host payload fixtures for the routing tests
-tests/evals/       paid behavioral scenarios (delegation-routing/run.py) and recorded results
+tests/evals/       paid behavioral scenarios (delegation-routing/, context-watch/) and recorded results
 .github/workflows/ CI that lints every skill
 ```
 

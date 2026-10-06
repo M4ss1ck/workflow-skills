@@ -1,0 +1,59 @@
+[
+  {
+    "scenario": "warn-is-user-only",
+    "about": "WARN reaches the user's stream as a systemMessage and never the model",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook fired at the expected level": true,
+      "host rendered the WARN as an informational message": true,
+      "model did not see the WARN": true
+    },
+    "reply": "NONE",
+    "hook_state": {
+      "urge_level": 0,
+      "warned": true,
+      "baseline": 39689
+    },
+    "cost_usd": 0.2581646,
+    "run_dir": "/tmp/cw-eval-warn-is-user-only-i9tksaq0"
+  },
+  {
+    "scenario": "warn-is-user-only",
+    "about": "WARN reaches the user's stream as a systemMessage and never the model",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook fired at the expected level": true,
+      "host rendered the WARN as an informational message": true,
+      "model did not see the WARN": true
+    },
+    "reply": "NONE",
+    "hook_state": {
+      "urge_level": 0,
+      "warned": true,
+      "baseline": 42195
+    },
+    "cost_usd": 0.27994080000000005,
+    "run_dir": "/tmp/cw-eval-warn-is-user-only-l0o0jgz1"
+  },
+  {
+    "scenario": "warn-is-user-only",
+    "about": "WARN reaches the user's stream as a systemMessage and never the model",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook fired at the expected level": true,
+      "host rendered the WARN as an informational message": true,
+      "model did not see the WARN": true
+    },
+    "reply": "NONE",
+    "hook_state": {
+      "urge_level": 0,
+      "warned": true,
+      "baseline": 39689
+    },
+    "cost_usd": 0.25813440000000004,
+    "run_dir": "/tmp/cw-eval-warn-is-user-only-uajmbakf"
+  }
+]

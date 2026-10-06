@@ -148,7 +148,7 @@ data = json.load(open(sys.argv[1]))
 for groups in data.get("hooks", {}).values():
     for group in groups:
         for h in group["hooks"]:
-            if "workflow-skills-routing" in h["command"]:
+            if h["command"].rstrip().endswith("# workflow-skills-routing"):
                 print(h["command"])
 PY
 }
@@ -270,7 +270,7 @@ echo "$out" | grep -q 'NOT installed: python3 is required' || fail "missing pyth
 # copy mode: one owned runtime that survives the checkout disappearing
 checkout="$tmp_root/checkout copy"
 mkdir -p "$checkout"
-cp -R "$repo_root/scripts" "$repo_root/skills" "$repo_root/hooks" "$checkout/"
+cp -R "$repo_root/scripts" "$repo_root/skills" "$repo_root/hooks" "$repo_root/plugins" "$checkout/"
 rm -rf "$XDG_DATA_HOME" "$settings"
 HOME="$tmp_home" "$checkout/scripts/install.sh" --agent claude --copy </dev/null >/dev/null
 runtime="$XDG_DATA_HOME/workflow-skills/opencode-subagent"
@@ -294,5 +294,136 @@ echo "$out" | grep -q 'was not installed by workflow-skills' || fail "unowned ru
 [ ! -e "$tmp_home/.local/bin/opencode-delegate" ] || fail "PATH command installed despite runtime conflict"
 [ -z "$(hook_commands "$settings" 2>/dev/null)" ] || fail "hooks installed despite runtime conflict"
 rm -rf "$runtime"
+
+# ---------------------------------------------------------------- context-watch hook
+
+cw_commands() {  # owned context-watch hook commands, one per line
+  [ -f "$1" ] || return 0
+  python3 - "$1" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+for groups in data.get("hooks", {}).values():
+    for group in groups:
+        for h in group["hooks"]:
+            if h["command"].rstrip().endswith("# workflow-skills-context-watch"):
+                print(h["command"])
+PY
+}
+
+transcript="$tmp_root/session.jsonl"
+python3 - "$transcript" <<'PY'
+import json, sys
+row = {"type": "assistant", "message": {"model": "m", "usage": {"input_tokens": 2, "cache_read_input_tokens": 230000, "cache_creation_input_tokens": 500}}}
+open(sys.argv[1], "w").write(json.dumps(row) + "\n")
+PY
+cw_payload="{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"cw-$RANDOM\",\"transcript_path\":\"$transcript\",\"prompt\":\"hi\"}"
+run_cw() {  # the host's way: sh -c, from /, bare PATH; a fresh session id each run
+  local payload="${cw_payload/cw-/cw-$RANDOM-}"
+  env -i HOME="$tmp_home" PATH="/usr/bin:/bin" XDG_STATE_HOME="$XDG_STATE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" \
+    /bin/sh -c "cd / && $1" <<<"$payload"
+}
+
+# the default claude install registers it once, next to routing, idempotently
+rm -rf "$settings" "$XDG_DATA_HOME" "$tmp_home/.claude/plugins"
+out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" </dev/null)"
+echo "$out" | grep -q 'context-watch WARNS past 200k' || fail "context-watch install was not announced: $out"
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
+[ "$(cw_commands "$settings" | wc -l)" -eq 1 ] || fail "expected 1 context-watch entry after rerun: $(cw_commands "$settings")"
+[ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "context-watch disturbed the routing entries"
+python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert any('context-watch' in h['command'] for g in d['hooks']['UserPromptSubmit'] for h in g['hooks'])" "$settings" \
+  || fail "context-watch is not a UserPromptSubmit hook"
+cmd="$(cw_commands "$settings")"
+echo "$cmd" | grep -q "$repo_root/skills/context-watch/scripts/context_watch.py" || fail "symlink-mode context-watch does not use the checkout: $cmd"
+out="$(run_cw "$cmd")"
+echo "$out" | grep -q 'past 200k\.' || fail "installed context-watch hook did not warn: $out"
+
+# a checkout without the core never blocks a prompt
+gone_cmd="${cmd//$repo_root\/skills\/context-watch/$tmp_root/no-such-checkout}"
+[ "$gone_cmd" != "$cmd" ] || fail "could not retarget the context-watch command"
+set +e
+out="$(run_cw "$gone_cmd")"
+status=$?
+set -e
+[ "$status" -eq 0 ] && [ -z "$out" ] || fail "missing core blocked a prompt (exit $status): $out"
+
+# --remove-context-watch takes only context-watch; --remove-hooks takes both
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --remove-context-watch </dev/null >/dev/null
+[ -z "$(cw_commands "$settings")" ] || fail "--remove-context-watch left the entry"
+[ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "--remove-context-watch removed routing entries"
+out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --remove-context-watch </dev/null)"
+echo "$out" | grep -q 'no context-watch hook to remove' || fail "second --remove-context-watch was not a no-op: $out"
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --remove-hooks --agent claude </dev/null >/dev/null
+[ -z "$(cw_commands "$settings")$(hook_commands "$settings")" ] || fail "--remove-hooks left owned entries"
+
+# --no-context-watch skips only it; --no-hooks skips everything
+out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude --no-context-watch </dev/null)"
+echo "$out" | grep -q 'context-watch skipped' || fail "--no-context-watch not reported: $out"
+[ -z "$(cw_commands "$settings")" ] || fail "--no-context-watch registered the hook"
+[ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "--no-context-watch skipped routing"
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --remove-hooks --agent claude </dev/null >/dev/null
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude --no-hooks </dev/null >/dev/null
+[ -z "$(cw_commands "$settings")" ] || fail "--no-hooks registered context-watch"
+
+# an installed context-watch plugin already ships the hook; routing is still added
+mkdir -p "$tmp_home/.claude/plugins"
+echo '{"version":2,"plugins":{"context-watch@workflow-skills":[{"installPath":"/x"}]}}' >"$tmp_home/.claude/plugins/installed_plugins.json"
+out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null)"
+echo "$out" | grep -q 'context-watch plugin is installed' || fail "context-watch plugin not detected: $out"
+[ -z "$(cw_commands "$settings")" ] || fail "context-watch duplicated next to its plugin"
+[ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "the context-watch plugin suppressed routing"
+rm -rf "$tmp_home/.claude/plugins"
+
+# codex gets routing only
+rm -f "$tmp_home/.codex/hooks.json"
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent codex </dev/null >/dev/null
+[ -z "$(cw_commands "$tmp_home/.codex/hooks.json")" ] || fail "context-watch registered for codex"
+
+# a plugin installed after a local registration takes over: the local entry goes
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
+[ "$(cw_commands "$settings" | wc -l)" -eq 1 ] || fail "local context-watch not registered"
+mkdir -p "$tmp_home/.claude/plugins"
+echo '{"version":2,"plugins":{"context-watch@workflow-skills":[{"installPath":"/x"}]}}' >"$tmp_home/.claude/plugins/installed_plugins.json"
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
+[ -z "$(cw_commands "$settings")" ] || fail "local context-watch kept running next to its plugin"
+rm -rf "$tmp_home/.claude/plugins"
+
+# ownership is the trailing marker comment, never a substring: a checkout path
+# that contains the other marker must not make one install wipe the other
+for name in workflow-skills-context-watch workflow-skills-routing; do
+  odd="$tmp_root/$name/checkout"
+  mkdir -p "$odd"
+  cp -R "$repo_root/scripts" "$repo_root/skills" "$repo_root/hooks" "$repo_root/plugins" "$odd/"
+  rm -rf "$settings" "$XDG_DATA_HOME"
+  HOME="$tmp_home" "$odd/scripts/install.sh" --agent claude </dev/null >/dev/null
+  HOME="$tmp_home" "$odd/scripts/install.sh" --agent claude </dev/null >/dev/null
+  [ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "routing entries lost under a $name path: $(cat "$settings")"
+  [ "$(cw_commands "$settings" | wc -l)" -eq 1 ] || fail "context-watch entry lost under a $name path: $(cat "$settings")"
+  HOME="$tmp_home" "$odd/scripts/install.sh" --remove-context-watch </dev/null >/dev/null
+  [ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "--remove-context-watch took routing under a $name path"
+  rm -rf "$tmp_root/$name"
+done
+
+# copy mode: an owned core that survives the checkout disappearing
+checkout="$tmp_root/checkout cw"
+mkdir -p "$checkout"
+cp -R "$repo_root/scripts" "$repo_root/skills" "$repo_root/hooks" "$repo_root/plugins" "$checkout/"
+rm -rf "$settings" "$XDG_DATA_HOME"
+HOME="$tmp_home" "$checkout/scripts/install.sh" --agent claude --copy </dev/null >/dev/null
+cmd="$(cw_commands "$settings")"
+echo "$cmd" | grep -q "$XDG_DATA_HOME/workflow-skills/context-watch/context_watch.py" || fail "copy-mode context-watch is not the owned copy: $cmd"
+rm -rf "$checkout"
+out="$(run_cw "$cmd")"
+echo "$out" | grep -q 'past 200k\.' || fail "copy-mode context-watch broke after removing the checkout: $out"
+
+# a later symlink install drops the stale core copy
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
+[ ! -e "$XDG_DATA_HOME/workflow-skills/context-watch" ] || fail "symlink install kept the stale copy-mode core"
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude --copy </dev/null >/dev/null
+
+# removal also deletes the owned shim and core copy
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --remove-context-watch </dev/null >/dev/null
+[ ! -e "$XDG_DATA_HOME/workflow-skills/context-watch-shim.sh" ] && [ ! -e "$XDG_DATA_HOME/workflow-skills/context-watch" ] \
+  || fail "--remove-context-watch left owned files behind"
 
 echo "Installer tests passed."
