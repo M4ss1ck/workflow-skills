@@ -1,0 +1,118 @@
+[
+  {
+    "scenario": "warn-is-user-only",
+    "about": "WARN reaches the user's stream as a systemMessage and never the model",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook fired at the expected level": true,
+      "host rendered the WARN as an informational message": true,
+      "model did not see the WARN": true
+    },
+    "reply": "NONE",
+    "hook_state": {
+      "urge_level": 0,
+      "warned": true,
+      "baseline": 40025
+    },
+    "cost_usd": 0.2621964,
+    "run_dir": "/tmp/cw-eval-warn-is-user-only-uvml74qq"
+  },
+  {
+    "scenario": "warn-is-user-only",
+    "about": "WARN reaches the user's stream as a systemMessage and never the model",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook fired at the expected level": true,
+      "host rendered the WARN as an informational message": true,
+      "model did not see the WARN": true
+    },
+    "reply": "NONE",
+    "hook_state": {
+      "urge_level": 0,
+      "warned": true,
+      "baseline": 39694
+    },
+    "cost_usd": 0.2581968,
+    "run_dir": "/tmp/cw-eval-warn-is-user-only-c_gvvxbd"
+  },
+  {
+    "scenario": "urge-reaches-model",
+    "about": "URGE puts the [context-watch] line in the model's context",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook fired at the expected level": true,
+      "model quoted the URGE line": true
+    },
+    "reply": "[context-watch] This session's context is ~40k tokens.\n\nThe context is getting large, so `/compact` or `/clear` would make later turns cheaper and sharper.",
+    "hook_state": {
+      "warned": true,
+      "urge_level": 2000,
+      "baseline": 39697
+    },
+    "cost_usd": 0.26145660000000004,
+    "run_dir": "/tmp/cw-eval-urge-reaches-model-_m5rb8k5"
+  },
+  {
+    "scenario": "urge-reaches-model",
+    "about": "URGE puts the [context-watch] line in the model's context",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook fired at the expected level": true,
+      "model quoted the URGE line": true
+    },
+    "reply": "[context-watch] This session's context is ~42k tokens.\n\nThe context is getting large, so /compact or /clear would make later turns cheaper and sharper.",
+    "hook_state": {
+      "warned": true,
+      "urge_level": 2000,
+      "baseline": 42190
+    },
+    "cost_usd": 0.2813466,
+    "run_dir": "/tmp/cw-eval-urge-reaches-model-5okm5kw0"
+  },
+  {
+    "scenario": "urge-keeps-working",
+    "about": "URGE does not make the model stop, shorten the task or ask instead of doing it",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook fired at the expected level": true,
+      "numbers.txt complete": true,
+      "squares.txt complete": true,
+      "sum.txt complete": true,
+      "turn ended with DONE": true
+    },
+    "reply": "DONE. The three files are written, but my check script was blocked by a permission prompt, so I didn't run it. I worked the values out by hand: 60\u00b761/2 = 1830, and the squares run from 1 to 400.",
+    "hook_state": {
+      "warned": true,
+      "urge_level": 2000,
+      "baseline": 39696
+    },
+    "cost_usd": 0.3032076,
+    "run_dir": "/tmp/cw-eval-urge-keeps-working-dmnsks_w"
+  },
+  {
+    "scenario": "urge-keeps-working",
+    "about": "URGE does not make the model stop, shorten the task or ask instead of doing it",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook fired at the expected level": true,
+      "numbers.txt complete": true,
+      "squares.txt complete": true,
+      "sum.txt complete": true,
+      "turn ended with DONE": true
+    },
+    "reply": "DONE\n\nThe session context is now large, so `/compact` or `/clear` would make later turns cheaper and sharper.",
+    "hook_state": {
+      "warned": true,
+      "urge_level": 2000,
+      "baseline": 39697
+    },
+    "cost_usd": 0.27789340000000007,
+    "run_dir": "/tmp/cw-eval-urge-keeps-working-l18fnjj9"
+  }
+]
