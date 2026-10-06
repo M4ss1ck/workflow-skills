@@ -416,6 +416,11 @@ rm -rf "$checkout"
 out="$(run_cw "$cmd")"
 echo "$out" | grep -q 'past 200k\.' || fail "copy-mode context-watch broke after removing the checkout: $out"
 
+# a later symlink install drops the stale core copy
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
+[ ! -e "$XDG_DATA_HOME/workflow-skills/context-watch" ] || fail "symlink install kept the stale copy-mode core"
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude --copy </dev/null >/dev/null
+
 # removal also deletes the owned shim and core copy
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --remove-context-watch </dev/null >/dev/null
 [ ! -e "$XDG_DATA_HOME/workflow-skills/context-watch-shim.sh" ] && [ ! -e "$XDG_DATA_HOME/workflow-skills/context-watch" ] \

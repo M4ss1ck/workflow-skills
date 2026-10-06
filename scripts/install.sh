@@ -460,6 +460,7 @@ install_context_watch() {
     mv "$cw_runtime/context_watch.py.tmp.$$" "$cw_runtime/context_watch.py"
     entry="$cw_runtime/context_watch.py"
   else
+    rm -rf "$cw_runtime"                # a stale copy from an earlier --copy install
     entry="$src/context_watch.py"
   fi
   result="$(merge_hooks claude install "$python" "$entry" "$cw_marker" "$cw_template" "$cw_shim")"
