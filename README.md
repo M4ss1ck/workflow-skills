@@ -99,16 +99,17 @@ Limits. The router checks that the recorded source words exist and that the reco
 
 ## Context watch
 
-Every turn re-reads the whole context, so a long session costs more per turn and recalls less reliably. The `context-watch` hook (Claude Code, `UserPromptSubmit`) reads the session's newest usage row on every prompt:
+Every turn re-reads the whole context, so a long session costs more per turn and recalls less reliably. The `context-watch` hook (Claude Code) reads the session's newest usage row after every tool call (`PostToolUse`, `PostToolUseFailure`) and on every prompt (`UserPromptSubmit`), so a long autonomous turn is caught where it crosses a threshold:
 
-- **WARN, 200k by default:** a message to you only. Claude Code shows `systemMessage` in the UI and never sends it to the model.
-- **URGE, 400k by default:** the same message, plus one informational line to the model. It tells the model to keep working at full quality, mention the size once at a natural stop, and never compact or clear by itself.
-- **Frequency:** each threshold fires once per crossing, and URGE repeats every further 100k. A compaction, or a drop well below WARN, re-arms both. Small dips around a threshold do not re-fire it. Prompts nobody typed (`/loop` ticks, background-agent reports) also trigger it, so a crossing can be announced while you are away; the message stays in the session's history.
-- **Your call:** the message suggests `/compact`, or saving what matters and starting over with `/clear`. Nothing happens automatically.
+- **WARN, 200k by default:** a notice to you. Crossed after a tool call, the model also gets a line: finish the step it is on, stop, and tell you the size, with no new steps, no handoff and no `/compact` or `/clear` of its own. Crossed when you send a message, it is the notice only.
+- **URGE, 400k by default:** the turn stops (`continue: false`). You see the hook's message with the size; what comes next is your call: compact, run your handoff, or tell Claude to continue.
+- **Frequency:** each threshold fires once per crossing. Continuing after the stop is not stopped again; a compaction, or a drop well below the threshold, re-arms it. Small dips around a threshold do not re-fire it. Prompts nobody typed (`/loop` ticks, background-agent reports) also trigger it.
+- **At a prompt:** a crossing first seen when you send a message cannot stop the turn without discarding that message, so the model is told to raise the size with you before starting the work.
+- **Headless runs:** `claude -p` sessions that cross URGE stop too. Raise `CONTEXT_WATCH_URGE` or set `CONTEXT_WATCH_DISABLE=1` for unattended automation.
 
 Thresholds are absolute because quality tracks absolute tokens, not the share of the window: Anthropic's Opus 4.6 system card shows the same 1M-window model dropping from 93 to 76-78 on MRCR v2 8-needle between the 128k-256k and 524k-1M bands. Claude Code's own warning on a 1M window only appears at about 947k. On a 200k-window model Claude Code auto-compacts at about 167k, before WARN, so those sessions rely on its built-in notice.
 
-Install it as its own plugin (`context-watch@workflow-skills`) or through `scripts/install.sh --agent claude`, which registers it by default under the marker `workflow-skills-context-watch`. The two hooks are independent: either can be installed or removed without the other. Configure it through `CONTEXT_WATCH_WARN`, `CONTEXT_WATCH_URGE` and `CONTEXT_WATCH_DISABLE`, set in the environment (or `settings.json` `env`) or in `~/.config/workflow-skills/context-watch.conf`; the environment wins. Subagent prompts are ignored. It is Claude Code only: the skill's `status` command reads Claude Code transcripts. Any failure is silent: the hook runs through a shim that always exits 0, so a broken install never blocks a prompt.
+Install it as its own plugin (`context-watch@workflow-skills`) or through `scripts/install.sh --agent claude`, which registers it by default under the marker `workflow-skills-context-watch`. The two hooks are independent: either can be installed or removed without the other. Configure it through `CONTEXT_WATCH_WARN`, `CONTEXT_WATCH_URGE` and `CONTEXT_WATCH_DISABLE`, set in the environment (or `settings.json` `env`) or in `~/.config/workflow-skills/context-watch.conf`; the environment wins. Subagent prompts and tool calls are ignored. It is Claude Code only: the skill's `status` command reads Claude Code transcripts. Any failure is silent: the hook runs through a shim that always exits 0, so a broken install never blocks a prompt.
 
 Not on OpenCode yet: the OpenCode 2.x plugin API (`setup(api)`) has no stable prompt or context hooks. Upstream lists them as a future migration step.
 

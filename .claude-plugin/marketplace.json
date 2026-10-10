@@ -16,7 +16,7 @@
     {
       "name": "context-watch",
       "source": "./plugins/context-watch",
-      "description": "Warns when a session's context passes 200k and 400k tokens, so you can /compact or /clear before cost and recall get worse.",
+      "description": "Past 200k tokens of context, asks Claude to finish its step and stop; past 400k, stops the turn so you decide: compact, hand off, or continue.",
       "category": "development"
     }
   ]

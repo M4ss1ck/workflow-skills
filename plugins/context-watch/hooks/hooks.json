@@ -1,7 +1,29 @@
 {
-  "description": "context-watch: warn when the session's context passes the configured token thresholds.",
+  "description": "context-watch: warn, then stop the turn, when the session's context passes the configured token thresholds.",
   "hooks": {
     "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/context-watch-shim.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/context_watch.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/context-watch-shim.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/context_watch.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
       {
         "hooks": [
           {

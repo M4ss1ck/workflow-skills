@@ -174,9 +174,15 @@ class Decisions(unittest.TestCase):
         self.assertEqual(self.run_sizes([150_000, 210_000, 250_000, 399_999, 410_000, 450_000]),
                          [None, "warn", None, None, "urge", None])
 
-    def test_urge_repeats_every_step(self):
-        self.assertEqual(self.run_sizes([410_000, 499_000, 500_000, 560_000, 610_000, 900_000]),
-                         ["urge", None, "urge", None, "urge", "urge"])
+    def test_urge_fires_once_however_far_it_grows(self):
+        # The stop hands the decision to the user; continuing past it is their call.
+        self.assertEqual(self.run_sizes([410_000, 499_000, 500_000, 610_000, 900_000, 1_500_000]),
+                         ["urge", None, None, None, None, None])
+
+    def test_state_from_the_repeating_version_counts_as_urged(self):
+        state = {"warned": True, "urge_level": 500_000}
+        self.assertIsNone(cw.decide(state, 560_000, CFG))
+        self.assertEqual(state, {"warned": True, "urged": True})
 
     def test_jumping_straight_past_urge_sends_one_urge(self):
         self.assertEqual(self.run_sizes([100_000, 450_000, 460_000]), [None, "urge", None])
@@ -194,10 +200,8 @@ class Decisions(unittest.TestCase):
         self.assertEqual(self.run_sizes([505_000, 495_000, 505_000]), ["urge", None, None])
         self.assertEqual(self.run_sizes([201_000, 170_000, 201_000]), ["warn", None, "warn"])
 
-    def test_partial_compaction_lowers_the_mark(self):
-        # 520k announced at the 500k level, compacted to 430k, regrown to 510k:
-        # the 500k level is news again.
-        self.assertEqual(self.run_sizes([520_000, 430_000, 510_000]), ["urge", None, "urge"])
+    def test_partial_compaction_above_urge_does_not_rearm(self):
+        self.assertEqual(self.run_sizes([520_000, 430_000, 510_000]), ["urge", None, None])
 
     def test_drop_into_warn_band_rearms_urge(self):
         self.assertEqual(self.run_sizes([410_000, 300_000, 410_000]), ["urge", None, "urge"])
@@ -240,35 +244,102 @@ class Config(Tmp):
 
 
 class Hook(Tmp):
-    def test_warn_goes_to_the_user_only(self):
+    def tool(self, path, **extra):
+        return self.payload(path, **dict({"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                                          "tool_input": {"command": "ls"}, "tool_use_id": "t1"}, **extra))
+
+    def test_warn_after_a_tool_call_tells_the_user_and_asks_the_model_to_stop(self):
+        path = self.transcript([usage_row(40_000), usage_row(215_000)])
+        out = cw.run_hook(self.tool(path), CFG)
+        self.assertEqual(set(out), {"systemMessage", "hookSpecificOutput"})
+        self.assertTrue(out["systemMessage"].startswith("context-watch: ~215k tokens (5.4x session start), past 200k."),
+                        out["systemMessage"])
+        ctx = out["hookSpecificOutput"]
+        self.assertEqual(ctx["hookEventName"], "PostToolUse")
+        for phrase in ("[context-watch]", "Finish the step you are on, then stop", "Do not start another step",
+                       "Do not write a handoff", "never run /compact or /clear"):
+            self.assertIn(phrase, ctx["additionalContext"])
+        self.assertNotIn("continue", out)
+        self.assertIsNone(cw.run_hook(self.tool(path), CFG))
+
+    def test_urge_after_a_tool_call_stops_the_turn(self):
+        path = self.transcript([usage_row(40_000), usage_row(412_000)])
+        out = cw.run_hook(self.tool(path), CFG)
+        self.assertEqual(set(out), {"continue", "stopReason"})
+        self.assertIs(out["continue"], False)
+        self.assertTrue(out["stopReason"].startswith(
+            "context-watch stopped this turn: the context is ~412k tokens (10.3x session start), past 400k."),
+            out["stopReason"])
+        self.assertLess(len(out["stopReason"].split()), 40)
+        # once per crossing: continuing after the stop is not stopped again
+        self.assertIsNone(cw.run_hook(self.tool(path), CFG))
+        grown = self.transcript([usage_row(40_000), usage_row(650_000)], name="grown.jsonl")
+        self.assertIsNone(cw.run_hook(self.tool(grown), CFG))
+
+    def test_compaction_rearms_the_stop(self):
+        path = self.transcript([usage_row(40_000), usage_row(412_000)])
+        self.assertIs(cw.run_hook(self.tool(path), CFG)["continue"], False)
+        small = self.transcript([usage_row(40_000), usage_row(412_000), boundary_row(30_000)], name="c.jsonl")
+        self.assertIsNone(cw.run_hook(self.tool(small), CFG))
+        self.assertIn("hookSpecificOutput", cw.run_hook(self.tool(self.transcript(
+            [usage_row(40_000), usage_row(230_000)], name="w.jsonl")), CFG))
+        self.assertIs(cw.run_hook(self.tool(path), CFG)["continue"], False)
+
+    def test_warn_at_a_prompt_goes_to_the_user_only(self):
         path = self.transcript([usage_row(40_000), usage_row(215_000)])
         out = cw.run_hook(self.payload(path), CFG)
         self.assertEqual(set(out), {"systemMessage"})
-        msg = out["systemMessage"]
-        self.assertTrue(msg.startswith("context-watch: ~215k tokens (5.4x session start), past 200k."), msg)
-        self.assertIn("/compact", msg)
-        self.assertLess(len(msg.split()), 35, msg)
+        self.assertLess(len(out["systemMessage"].split()), 35)
         self.assertIsNone(cw.run_hook(self.payload(path), CFG))
 
-    def test_urge_also_tells_the_model(self):
-        path = self.transcript([usage_row(40_000), usage_row(612_000)])
+    def test_urge_at_a_prompt_asks_the_model_to_raise_it_first(self):
+        # Stopping here would discard the user's message, so the model is told instead.
+        path = self.transcript([usage_row(40_000), usage_row(412_000)])
         out = cw.run_hook(self.payload(path), CFG)
-        self.assertIn("still growing, ~612k tokens (15.3x session start), past 600k.", out["systemMessage"])
+        self.assertNotIn("continue", out)
+        self.assertIn("past 400k", out["systemMessage"])
         ctx = out["hookSpecificOutput"]
         self.assertEqual(ctx["hookEventName"], "UserPromptSubmit")
-        self.assertIn("[context-watch]", ctx["additionalContext"])
-        self.assertIn("Never run /compact or /clear yourself", ctx["additionalContext"])
-        self.assertIn("full quality", ctx["additionalContext"])
+        self.assertIn("ask how they want to proceed", ctx["additionalContext"])
+        self.assertIn("Do not start the work until they answer", ctx["additionalContext"])
+        # the prompt spent the crossing: a tool call in the same turn does not stop it
+        self.assertIsNone(cw.run_hook(self.tool(path), CFG))
 
-    def test_subagent_prompts_neither_warn_nor_spend_the_warning(self):
+    def test_a_failed_tool_call_also_counts(self):
+        path = self.transcript([usage_row(412_000)])
+        out = cw.run_hook(self.tool(path, hook_event_name="PostToolUseFailure", error="exit 1"), CFG)
+        self.assertIs(out["continue"], False)
+        warn = self.transcript([usage_row(215_000)], name="w.jsonl")
+        out = cw.run_hook(self.tool(warn, hook_event_name="PostToolUseFailure", session_id="s2"), CFG)
+        self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "PostToolUseFailure")
+
+    def test_one_crossing_fires_once_across_both_events(self):
+        path = self.transcript([usage_row(215_000)])
+        self.assertIsNotNone(cw.run_hook(self.tool(path), CFG))
+        self.assertIsNone(cw.run_hook(self.payload(path), CFG))
+
+    def test_subagents_neither_warn_nor_spend_the_warning(self):
         path = self.transcript([usage_row(420_000)])
-        self.assertIsNone(cw.run_hook(self.payload(path, agent_id="a1", agent_type="general-purpose"), CFG))
+        for payload in (self.payload(path, agent_id="a1", agent_type="general-purpose"),
+                        self.tool(path, agent_id="a1", agent_type="general-purpose")):
+            self.assertIsNone(cw.run_hook(payload, CFG))
         self.assertFalse(os.path.exists(cw._state_dir()))
-        self.assertIn("hookSpecificOutput", cw.run_hook(self.payload(path), CFG))
+        self.assertIs(cw.run_hook(self.tool(path), CFG)["continue"], False)
+
+    def test_quiet_tool_calls_do_not_rewrite_state(self):
+        path = self.transcript([usage_row(50_000)])
+        cw.run_hook(self.tool(path), CFG)
+        state = os.path.join(cw._state_dir(), "sess-1.json")
+        before = os.stat(state).st_mtime_ns
+        time.sleep(0.01)
+        for _ in range(3):
+            self.assertIsNone(cw.run_hook(self.tool(path), CFG))
+        self.assertEqual(os.stat(state).st_mtime_ns, before)
 
     def test_silent_cases(self):
         path = self.transcript([usage_row(420_000)])
         self.assertIsNone(cw.run_hook(self.payload(path, hook_event_name="SessionStart"), CFG))
+        self.assertIsNone(cw.run_hook(self.payload(path, hook_event_name="PreToolUse"), CFG))
         self.assertIsNone(cw.run_hook(self.payload(os.path.join(self.tmp, "missing.jsonl")), CFG))
         self.assertIsNone(cw.run_hook(self.payload(path, session_id=""), CFG))
         self.assertIsNone(cw.run_hook(self.payload(path), dict(CFG, disabled=True)))
@@ -320,6 +391,8 @@ class Shim(Tmp):
         out = run_shim(CORE, self.payload(path))
         self.assertEqual(out.returncode, 0)
         self.assertIn("additionalContext", json.loads(out.stdout)["hookSpecificOutput"])
+        stop = run_shim(CORE, dict(self.payload(path), hook_event_name="PostToolUse", session_id="sess-2"))
+        self.assertIs(json.loads(stop.stdout)["continue"], False)
 
     def test_a_broken_entry_never_blocks_the_prompt(self):
         # python exits 2 for a missing script; exit 2 from UserPromptSubmit blocks the prompt.
@@ -339,19 +412,25 @@ class Shim(Tmp):
         self.assertEqual((out.returncode, out.stdout), (0, ""))
 
     def test_parallel_hooks_warn_exactly_once(self):
-        # A plugin plus a local registration runs two handlers in parallel.
+        # A plugin plus a local registration, or a batch of parallel tool calls,
+        # runs several handlers at once.
         path = self.transcript([usage_row(420_000)])
+        events = ["UserPromptSubmit", "PostToolUse"] * 4
         with ThreadPoolExecutor(8) as pool:
-            outs = list(pool.map(lambda _: run_shim(CORE, self.payload(path)).stdout, range(8)))
+            outs = list(pool.map(lambda e: run_shim(CORE, dict(self.payload(path), hook_event_name=e)).stdout, events))
         self.assertEqual(sum(1 for o in outs if o.strip()), 1, outs)
 
 
 class Plugin(Tmp):
-    def test_plugin_ships_only_a_user_prompt_hook_that_runs(self):
+    def test_plugin_ships_the_prompt_and_tool_hooks_and_they_run(self):
         with open(os.path.join(PLUGIN, "hooks", "hooks.json")) as f:
             hooks = json.load(f)["hooks"]
-        self.assertEqual(list(hooks), ["UserPromptSubmit"])
-        command = hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
+        self.assertEqual(sorted(hooks), ["PostToolUse", "PostToolUseFailure", "UserPromptSubmit"])
+        commands = {e: hooks[e][0]["hooks"][0]["command"] for e in hooks}
+        self.assertEqual(len(set(commands.values())), 1)
+        for event in ("PostToolUse", "PostToolUseFailure"):
+            self.assertNotIn("matcher", hooks[event][0])  # every tool
+        command = commands["UserPromptSubmit"]
         path = self.transcript([usage_row(215_000)])
         # The way the host runs it: sh -c, from /, with a bare system PATH.
         env = {"HOME": self.tmp, "PATH": "/usr/bin:/bin", "CLAUDE_PLUGIN_ROOT": PLUGIN,

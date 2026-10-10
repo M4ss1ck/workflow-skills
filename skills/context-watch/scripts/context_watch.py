@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """context-watch: tell the user when a Claude Code session's context gets large.
 
-  context_watch.py hook      UserPromptSubmit handler: JSON payload on stdin, hook JSON on stdout
+  context_watch.py hook      PostToolUse(Failure) / UserPromptSubmit handler: JSON payload on stdin, hook JSON on stdout
   context_watch.py status    print the current session's context size, ratio and thresholds
 
 Context size is the newest real assistant usage row in the transcript:
 input_tokens + cache_read_input_tokens + cache_creation_input_tokens. It is
 what the model re-read on its last call, which is what every next turn pays for.
 
-Past WARN the user gets a systemMessage (shown in the UI, never sent to the
-model). Past URGE the model also gets one informational line, so it can raise
-the point at its next natural stop. WARN fires once per crossing; URGE fires at
-the crossing and again every URGE_STEP tokens of growth. Dropping below WARN
-(after /compact) re-arms both. Any failure is silent: the shim around this file
-always exits 0, because exit 2 from UserPromptSubmit blocks the user's prompt.
+The check runs after every tool call, so a long autonomous turn is caught where
+it crosses a threshold, not at the next user message:
+
+  WARN  the user gets a notice; the model is told to finish the step it is on,
+        stop, and tell the user the size.
+  URGE  the turn is stopped ({"continue": false}) with a message for the user.
+        The user decides what happens next: compact, hand off, or continue.
+
+Each threshold fires once per crossing and re-arms only after the context drops
+well below it (a compaction). A crossing first seen at a user prompt cannot stop
+anything without discarding that prompt, so there the model is told to raise it
+first instead. Any failure is silent: the shim around this file always exits 0,
+because exit 2 from UserPromptSubmit blocks the user's prompt.
 """
 import argparse
 import fcntl
@@ -26,7 +33,8 @@ import time
 
 DEFAULT_WARN = 200_000
 DEFAULT_URGE = 400_000
-URGE_STEP = 100_000
+TOOL_EVENTS = ("PostToolUse", "PostToolUseFailure")
+EVENTS = TOOL_EVENTS + ("UserPromptSubmit",)
 TAIL_START = 256 * 1024          # first backward read; doubles until it finds a row
 SCAN_CAP = 16 * 1024 * 1024      # never read more than this from either end
 STATE_TTL_DAYS = 30
@@ -223,37 +231,35 @@ def _prune(directory):
 def decide(state, size, cfg):
     """Advance the per-session state for a measured size; return None, "warn" or "urge".
 
-    WARN fires once per crossing. URGE fires at each URGE_STEP level it has not
-    fired at yet. Re-arming needs a real drop, a margin below the mark (a
-    compaction, not tool-result trimming hovering around it): falling below
-    WARN re-arms everything, and falling well below an announced URGE level
-    lowers the mark, so regrowth after a partial compaction is announced again.
+    Each threshold fires once per crossing. Re-arming needs a real drop, a
+    margin below the threshold (a compaction, not tool-result trimming hovering
+    around it): falling well below WARN re-arms both, falling well below URGE
+    re-arms URGE only. Jumping straight past URGE sends URGE alone.
     """
     warn, urge = cfg["warn"], cfg["urge"]
     margin = warn // 10
     if size == COMPACTED:
         size = 0
+    # State written by the repeating-URGE version kept an announced level instead.
+    urged = bool(state.pop("urge_level", 0)) or bool(state.get("urged"))
+    state["urged"] = urged
     if size < warn:
         if size < warn - margin:
             state["warned"] = False
-            state["urge_level"] = 0
+            state["urged"] = False
         return None
     if size < urge:
         if size < urge - margin:
-            state["urge_level"] = 0
+            state["urged"] = False
         if state.get("warned"):
             return None
         state["warned"] = True
         return "warn"
-    level = urge + (size - urge) // URGE_STEP * URGE_STEP
-    mark = int(state.get("urge_level") or 0)
     state["warned"] = True
-    if level > mark:
-        state["urge_level"] = level
-        return "urge"
-    if size < mark - margin:
-        state["urge_level"] = level
-    return None
+    if urged:
+        return None
+    state["urged"] = True
+    return "urge"
 
 
 def _k(n):
@@ -267,28 +273,40 @@ def describe(size, baseline):
     return f"~{_k(size)} tokens"
 
 
-def user_message(level, size, mark, baseline):
-    lead = "still growing, " if level == "urge" else ""
-    return (f"context-watch: {lead}{describe(size, baseline)}, past {_k(mark)}. Each turn re-reads all of it: "
-            f"costlier, and recall slips. When convenient: /compact if available, or save notes and /clear.")
+def user_message(size, mark, baseline):
+    return (f"context-watch: {describe(size, baseline)}, past {_k(mark)}. Each turn re-reads all of it: "
+            f"costlier, and recall slips.")
 
 
-def agent_message(size):
-    return (f"[context-watch] This session's context is ~{_k(size)} tokens. This is informational: continue "
-            "the current task at full quality and do not shorten, rush or skip steps because of it. At the "
-            "next natural stopping point, mention once to the user that the context is large and that "
-            "/compact or /clear would make later turns cheaper and sharper. Never run /compact or /clear "
-            "yourself, and do not repeat this unless asked.")
+def stop_message(size, mark, baseline):
+    return (f"context-watch stopped this turn: the context is {describe(size, baseline)}, past {_k(mark)}. "
+            "What next is your call: compact, hand off to a fresh session, or tell Claude to continue.")
+
+
+def warn_agent_message(size, mark):
+    return (f"[context-watch] This session's context passed {_k(mark)} (now ~{_k(size)} tokens). Finish the "
+            "step you are on, then stop and tell the user the context size so they can decide what to do "
+            "next. Do not start another step. Do not write a handoff, and never run /compact or /clear "
+            "yourself.")
+
+
+def urge_prompt_message(size, mark):
+    return (f"[context-watch] This session's context is ~{_k(size)} tokens, past {_k(mark)}. Before doing "
+            "anything for this message, tell the user the context size and ask how they want to proceed. "
+            "Do not start the work until they answer. Do not write a handoff, and never run /compact or "
+            "/clear yourself.")
 
 
 # ---------------------------------------------------------------- commands
 
 def run_hook(payload, cfg):
     """The hook decision for one payload: a dict to print, or None for silence."""
-    if cfg["disabled"] or payload.get("hook_event_name") != "UserPromptSubmit":
+    event = payload.get("hook_event_name")
+    if cfg["disabled"] or event not in EVENTS:
         return None
-    # Subagent prompts carry the parent's transcript and session id: measuring
-    # them would spend the main session's one-time warning on an agent with no user.
+    # Subagent tool calls and prompts carry the parent's session id: measuring
+    # them would spend the main session's one-time warning on an agent with no
+    # user, and stopping one would stop the subagent, not the session.
     if payload.get("agent_id"):
         return None
     path, session_id = payload.get("transcript_path"), payload.get("session_id")
@@ -298,18 +316,26 @@ def run_hook(payload, cfg):
     if size is None:
         return None
     with SessionState(session_id) as st:
+        before = dict(st.data)
         level = decide(st.data, size, cfg)
         if level and not st.data.get("baseline"):
             st.data["baseline"] = baseline_size(path)
         baseline = st.data.get("baseline")
-        mark = st.data["urge_level"] if level == "urge" else cfg["warn"]
-        st.save()
+        if st.data != before:
+            st.save()
     if level is None:
         return None
-    out = {"systemMessage": user_message(level, size, mark, baseline)}
+    mark = cfg["urge"] if level == "urge" else cfg["warn"]
+    if event in TOOL_EVENTS:
+        if level == "urge":
+            return {"continue": False, "stopReason": stop_message(size, mark, baseline)}
+        return {"systemMessage": user_message(size, mark, baseline),
+                "hookSpecificOutput": {"hookEventName": event,
+                                       "additionalContext": warn_agent_message(size, mark)}}
+    out = {"systemMessage": user_message(size, mark, baseline)}
     if level == "urge":
         out["hookSpecificOutput"] = {"hookEventName": "UserPromptSubmit",
-                                     "additionalContext": agent_message(size)}
+                                     "additionalContext": urge_prompt_message(size, mark)}
     return out
 
 
@@ -346,7 +372,8 @@ def run_status(args, cfg):
     else:
         zone = f"{_k(cfg['warn'] - size)} below WARN"
     print(f"context: {describe(size, baseline_size(path))}\n"
-          f"thresholds: WARN {_k(cfg['warn'])}, URGE {_k(cfg['urge'])} (then every {_k(URGE_STEP)}){' [disabled]' if cfg['disabled'] else ''}\n"
+          f"thresholds: WARN {_k(cfg['warn'])} (finish the step and report), URGE {_k(cfg['urge'])} (stop the turn)"
+          f"{' [disabled]' if cfg['disabled'] else ''}\n"
           f"status: {zone}\n"
           f"transcript: {path}")
     return 0
@@ -355,7 +382,7 @@ def run_status(args, cfg):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="context_watch.py", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("hook", help="UserPromptSubmit handler (payload on stdin)")
+    sub.add_parser("hook", help="PostToolUse / UserPromptSubmit handler (payload on stdin)")
     status = sub.add_parser("status", help="print the current session's context size")
     status.add_argument("--transcript")
     status.add_argument("--session-id")

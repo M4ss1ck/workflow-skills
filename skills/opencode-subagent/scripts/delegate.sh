@@ -30,6 +30,8 @@
 #   delegate.sh route hook|record|show|doctor|identity
 #
 # Options:
+#   --role worker|researcher worker edits code (default); researcher is read-only
+#                            with web access, for research and review
 #   --model provider/model   worker model (overrides the configured one)
 #   --cwd DIR                working tree for the worker
 #   --resume SESSION_ID      continue a session (start/run)
@@ -55,8 +57,10 @@
 set -euo pipefail
 
 provider="opencode"
+role=""
 agent_name="workflow-worker"
 model_key="OPENCODE_SUBAGENT_MODEL"
+research_model_key="OPENCODE_SUBAGENT_RESEARCH_MODEL"
 policy_key="OPENCODE_SUBAGENT_DELEGATION_POLICY"
 retention_key="OPENCODE_SUBAGENT_RETENTION_DAYS"
 raw_retention_key="OPENCODE_SUBAGENT_RAW_RETENTION_DAYS"
@@ -79,9 +83,7 @@ while [ -L "$self_path" ]; do
 done
 self_path="$(cd "$(dirname "$self_path")" && pwd)/$(basename "$self_path")"
 skill_dir="$(cd "$(dirname "$self_path")/.." && pwd)"
-agent_src="$skill_dir/agents/$agent_name.md"
 agent_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent"
-agent_dest="$agent_dir/$agent_name.md"
 watch_filter='.part.text? // empty'
 
 model=""
@@ -126,7 +128,7 @@ if [ "${1:-}" = "route" ]; then
       payload="$(cat)"
       case "$payload" in
         *'"PreToolUse"'*)
-          printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"opencode-subagent routing cannot run: its Python interpreter was not found. Native delegation stays blocked; run opencode-delegate route doctor."}}' ;;
+          printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"opencode-subagent routing cannot run: its Python interpreter was not found. Native delegation stays blocked; run opencode-delegate route doctor. If this was a review, do not review your own work instead: tell the user no independent review ran."}}' ;;
       esac
       exit 0
     fi
@@ -154,6 +156,7 @@ esac
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --model)        shift; model="${1:?--model requires a value}" ;;
+    --role)         shift; role="${1:?--role requires worker or researcher}" ;;
     --cwd)          shift; cwd="${1:?--cwd requires a path}" ;;
     --resume)       shift; resume="${1:?--resume requires a session id}" ;;
     --new-session)  new_session=1 ;;
@@ -226,9 +229,69 @@ resolve_policy() {
   esac
 }
 
-# --model wins, then the configured worker model. Never inherit OpenCode's own
-# default: this skill exists to run a specific cheap model, not whatever is global.
+# A role is one OpenCode agent definition. A Task keeps its role for life:
+# retry and resume read it back from task.json, so a correction cannot quietly
+# hand a read-only research Task to the editing worker or the reverse.
+role_agent() {
+  case "$1" in
+    worker)     echo "workflow-worker" ;;
+    researcher) echo "workflow-researcher" ;;
+    *)          return 1 ;;
+  esac
+}
+
+agent_role() {
+  case "$1" in
+    workflow-worker)     echo "worker" ;;
+    workflow-researcher) echo "researcher" ;;
+    *)                   return 1 ;;
+  esac
+}
+
+set_role() {
+  role="${1:-worker}"
+  agent_name="$(role_agent "$role")" || die "invalid --role: $role (want worker|researcher)"
+}
+
+# The role a Task was created with. Tasks from before roles existed are workers.
+task_role() {
+  local agent
+  agent="$(json_read "$1/task.json" '.agent // "workflow-worker"')"
+  agent_role "$agent" || die "task $(basename "$1") uses an unknown agent: $agent"
+}
+
+# The role of the newest Task, finished or not, that owns an OpenCode session.
+# A resumed session keeps its role even when its Task is long closed.
+session_role() {
+  local d agent="" newest=""
+  for d in "$state_root"/task_*/; do
+    [ -f "${d}task.json" ] || continue
+    [ "$(json_read "${d}task.json" '.session_id')" = "$1" ] || continue
+    if [ -z "$newest" ] || [ "${d}task.json" -nt "$newest" ]; then
+      newest="${d}task.json"
+      agent="$(json_read "$newest" '.agent // "workflow-worker"')"
+    fi
+  done
+  [ -n "$agent" ] || return 0
+  agent_role "$agent" || die "session $1 belongs to a Task with an unknown agent: $agent"
+}
+
+# A launch that resumes a session inherits the role that session ran with.
+inherit_session_role() {
+  local owner
+  [ -n "$resume" ] || return 0
+  owner="$(session_role "$resume")"
+  [ -n "$owner" ] || return 0
+  [ -z "$role_flag" ] || [ "$role_flag" = "$owner" ] \
+    || die "session $resume ran the $owner role; start a new session for --role $role_flag"
+  set_role "$owner"
+}
+
+# --model wins, then the configured model for the role (the researcher falls
+# back to the worker model). Never inherit OpenCode's own default: this skill
+# exists to run a specific cheap model, not whatever is global.
 resolve_model() {
+  if [ -z "$model" ] && [ "$role" = "researcher" ]; then model="$(conf_get "$research_model_key")"; fi
   if [ -z "$model" ]; then model="$(conf_get "$model_key")"; fi
   [ -n "$model" ] || die "no worker model: pass --model provider/model, or save one with --model provider/model --save-default (conf: $conf_file)"
 }
@@ -237,6 +300,7 @@ resolve_model() {
 # its unconstrained default agent), so the definition has to be on disk before
 # we launch. 2.x still reads agents from ~/.config/opencode/agent/.
 ensure_agent() {
+  local agent_src="$skill_dir/agents/$agent_name.md" agent_dest="$agent_dir/$agent_name.md"
   [ -f "$agent_src" ] || die "worker agent definition missing: $agent_src"
   if [ ! -f "$agent_dest" ] || ! cmp -s "$agent_src" "$agent_dest"; then
     mkdir -p "$agent_dir"
@@ -958,19 +1022,23 @@ do_policy() {
       *) die "invalid policy: $requested (want off|explicit|auto)" ;;
     esac
   fi
-  local current worker
+  local current worker researcher
   current="$(resolve_policy)"
   worker="$(conf_get "$model_key")"
+  researcher="$(conf_get "$research_model_key")"
   if [ "$json_out" -eq 1 ]; then
     jq -n --arg policy "$current" --arg model "$worker" --arg conf "$conf_file" --arg agent "$agent_name" \
+      --arg research "$researcher" \
       --argjson retention "$(conf_number "$retention_key" "$default_retention_days")" \
       --argjson raw_retention "$(conf_number "$raw_retention_key" "$default_raw_retention_days")" \
       '{delegation_policy: $policy, worker_model: (if $model == "" then null else $model end),
+        research_model: (if $research != "" then $research elif $model != "" then $model else null end),
         agent: $agent, conf_file: $conf,
         retention_days: $retention, raw_retention_days: $raw_retention}'
   else
     echo "DELEGATION_POLICY: $current"
     echo "WORKER_MODEL: ${worker:-none}"
+    echo "RESEARCH_MODEL: ${researcher:-${worker:-none}}"
     echo "CONF: $conf_file"
     echo "RETENTION_DAYS: $(conf_number "$retention_key" "$default_retention_days")"
     echo "RAW_RETENTION_DAYS: $(conf_number "$raw_retention_key" "$default_raw_retention_days")"
@@ -987,7 +1055,7 @@ preflight() {
   require_supported_opencode
   if [ "$save_default" -eq 1 ]; then
     [ -n "$model" ] || die "--save-default requires --model"
-    conf_set "$model_key" "$model"
+    if [ "$role" = "researcher" ]; then conf_set "$research_model_key" "$model"; else conf_set "$model_key" "$model"; fi
   fi
   local policy
   policy="$(resolve_policy)"
@@ -1014,7 +1082,7 @@ task_title() {
 # spawn_attempt ATTEMPT_DIR — detach the runner and record its pid.
 spawn_attempt() {
   local adir="$1" pid
-  local args=(--__run "$adir" --timeout "$hard_timeout" --model "$model")
+  local args=(--__run "$adir" --timeout "$hard_timeout" --model "$model" --role "$role")
   if [ -n "$cwd" ]; then args+=(--cwd "$cwd"); fi
   if [ -n "$resume" ]; then args+=(--resume "$resume"); fi
   git_porcelain "${cwd:-$PWD}" >"$adir/git-before.txt"
@@ -1056,6 +1124,7 @@ note_awaiting_tasks() {
 
 do_launch() {
   [ -n "$spec" ] || die "missing task spec"
+  inherit_session_role
   preflight
   resolve_cwd
 
@@ -1084,6 +1153,11 @@ do_retry() {
   spec="${positionals[1]:-}"
   [ -n "$spec" ] || die "retry requires a correction: delegate.sh retry TASK --reason R \"<correction>\""
   [ -n "$reason" ] || die "retry requires --reason (it becomes the durable supervisor decision)"
+  local task_role_name
+  task_role_name="$(task_role "$task_dir")"
+  [ -z "$role_flag" ] || [ "$role_flag" = "$task_role_name" ] \
+    || die "task $task_id runs the $task_role_name role; start a new task for --role $role_flag"
+  set_role "$task_role_name"
 
   preflight
 
@@ -1577,6 +1651,11 @@ do_recover() {
 }
 
 # -------------------------------------------------------------------- dispatch
+
+# The flag as given, before the default fills it in: retry needs to tell
+# "no --role" (keep the Task's) from an explicit one.
+role_flag="$role"
+set_role "$role"
 
 if [ -n "$runner_attemptdir" ]; then
   spec="${positionals[0]:-}"

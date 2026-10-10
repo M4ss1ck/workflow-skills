@@ -27,6 +27,6 @@ case "$payload" in
     mkdir -p "$(dirname "$marker")" 2>/dev/null && : >"$marker" 2>/dev/null
     ;;
   *'"PreToolUse"'*)
-    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"opencode-subagent routing is not runnable from the installed entry point (a checkout without routing, a moved install, or a crash). Native delegation stays blocked; work locally and run opencode-delegate route doctor or re-run scripts/install.sh."}}' ;;
+    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"opencode-subagent routing is not runnable from the installed entry point (a checkout without routing, a moved install, or a crash). Native delegation stays blocked; work locally and run opencode-delegate route doctor or re-run scripts/install.sh. If this was a review, do not review your own work instead: tell the user no independent review ran."}}' ;;
 esac
 exit 0

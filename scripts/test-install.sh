@@ -326,13 +326,16 @@ run_cw() {  # the host's way: sh -c, from /, bare PATH; a fresh session id each 
 # the default claude install registers it once, next to routing, idempotently
 rm -rf "$settings" "$XDG_DATA_HOME" "$tmp_home/.claude/plugins"
 out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" </dev/null)"
-echo "$out" | grep -q 'context-watch WARNS past 200k' || fail "context-watch install was not announced: $out"
+echo "$out" | grep -q 'context-watch asks Claude to wrap up past 200k' || fail "context-watch install was not announced: $out"
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
-[ "$(cw_commands "$settings" | wc -l)" -eq 1 ] || fail "expected 1 context-watch entry after rerun: $(cw_commands "$settings")"
+[ "$(cw_commands "$settings" | wc -l)" -eq 3 ] || fail "expected 3 context-watch entries after rerun: $(cw_commands "$settings")"
+[ "$(cw_commands "$settings" | sort -u | wc -l)" -eq 1 ] || fail "context-watch events run different commands"
 [ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "context-watch disturbed the routing entries"
-python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert any('context-watch' in h['command'] for g in d['hooks']['UserPromptSubmit'] for h in g['hooks'])" "$settings" \
-  || fail "context-watch is not a UserPromptSubmit hook"
-cmd="$(cw_commands "$settings")"
+for event in UserPromptSubmit PostToolUse PostToolUseFailure; do
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert any('context-watch' in h['command'] for g in d['hooks'][sys.argv[2]] for h in g['hooks'])" "$settings" "$event" \
+    || fail "context-watch is not a $event hook"
+done
+cmd="$(cw_commands "$settings" | head -1)"
 echo "$cmd" | grep -q "$repo_root/skills/context-watch/scripts/context_watch.py" || fail "symlink-mode context-watch does not use the checkout: $cmd"
 out="$(run_cw "$cmd")"
 echo "$out" | grep -q 'past 200k\.' || fail "installed context-watch hook did not warn: $out"
@@ -381,7 +384,7 @@ HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent codex </dev/null >/dev/
 
 # a plugin installed after a local registration takes over: the local entry goes
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
-[ "$(cw_commands "$settings" | wc -l)" -eq 1 ] || fail "local context-watch not registered"
+[ "$(cw_commands "$settings" | wc -l)" -eq 3 ] || fail "local context-watch not registered"
 mkdir -p "$tmp_home/.claude/plugins"
 echo '{"version":2,"plugins":{"context-watch@workflow-skills":[{"installPath":"/x"}]}}' >"$tmp_home/.claude/plugins/installed_plugins.json"
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
@@ -398,7 +401,7 @@ for name in workflow-skills-context-watch workflow-skills-routing; do
   HOME="$tmp_home" "$odd/scripts/install.sh" --agent claude </dev/null >/dev/null
   HOME="$tmp_home" "$odd/scripts/install.sh" --agent claude </dev/null >/dev/null
   [ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "routing entries lost under a $name path: $(cat "$settings")"
-  [ "$(cw_commands "$settings" | wc -l)" -eq 1 ] || fail "context-watch entry lost under a $name path: $(cat "$settings")"
+  [ "$(cw_commands "$settings" | wc -l)" -eq 3 ] || fail "context-watch entry lost under a $name path: $(cat "$settings")"
   HOME="$tmp_home" "$odd/scripts/install.sh" --remove-context-watch </dev/null >/dev/null
   [ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "--remove-context-watch took routing under a $name path"
   rm -rf "$tmp_root/$name"
