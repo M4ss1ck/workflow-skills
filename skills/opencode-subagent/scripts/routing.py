@@ -47,9 +47,28 @@ SCOPE_STATUSES = ("clear", "ambiguous", "conflicting")
 # Why research or review must run natively instead of on the OpenCode
 # researcher. A closed set: free text let every agent justify native work.
 NATIVE_REASONS = ("needs-host-tools", "opencode-failed")
-# Agent types that cannot change anything run without a routing decision.
+# Agent types that cannot change anything run without a routing decision. The
+# host's own read-only types always do; the conf key adds patterns to them
+# (absent: the default; empty: built-ins only).
 READONLY_KEY = "OPENCODE_SUBAGENT_READONLY_AGENTS"
-DEFAULT_READONLY_AGENTS = "Explore Plan claude-code-guide *-reviewer *-explorer"
+BUILTIN_READONLY_AGENTS = ("Explore", "Plan", "claude-code-guide")
+DEFAULT_READONLY_AGENTS = "*-reviewer *-explorer"
+# Tools whose PostToolUse reports the id of an agent the hook exempted
+# (verified live: Claude Code 2.1.296 tool_response.agentId, foreground and
+# background). hooks/hooks.json registers PostToolUse for exactly these.
+READONLY_CREATE_TOOLS = ("Agent", "Task")
+# Claude Code agent ids: "a" + hex, assigned by the host and never reused.
+# Follow-ups pass by id only: the host allocates, normalizes and reassigns
+# names (an unnamed agent is registered under its type), so a name the hook
+# saw on a read-only create can come to mean a writer.
+AGENT_ID_RE = re.compile(r"a[0-9a-f]{8,}")
+MAX_READONLY_AGENTS = 50
+# Events each host's hook file registers; doctor flags a registration missing one.
+HOOK_EVENTS = {
+    "claude": ("UserPromptSubmit", "SessionStart", "PreToolUse", "PostToolUse"),
+    "codex": ("UserPromptSubmit", "SessionStart", "PreToolUse"),
+}
+CLAUDE_ONLY_EVENTS = ("PostToolUse",)
 # Claude Code injects an invoked skill's body as a meta user row starting so.
 SKILL_BODY_PREFIX = "Base directory for this skill:"
 TRANSCRIPT_SCAN_CAP = 512 * 1024 * 1024
@@ -170,18 +189,18 @@ def read_policy(path=None):
 
 
 def readonly_agents(path=None):
-    """Patterns naming agent types that skip routing. Absent means the default
-    list; present and empty means none."""
+    """Patterns naming agent types that skip routing: the built-ins, plus the
+    configured patterns (absent means the default, empty means none)."""
     value = conf_value(READONLY_KEY, path)
     if value is None:
         value = DEFAULT_READONLY_AGENTS
-    return [p for p in re.split(r"[\s,]+", value) if p]
+    return list(BUILTIN_READONLY_AGENTS) + [p for p in re.split(r"[\s,]+", value) if p]
 
 
 def is_readonly_agent(tool, operation, tool_input, patterns):
     """Only a new agent of a named read-only type: a continuation names an
     agent instance, whose type the hook cannot see."""
-    if operation != "create" or tool not in ("Agent", "Task"):
+    if operation != "create" or tool not in READONLY_CREATE_TOOLS:
         return False
     kind = tool_input.get("subagent_type")
     return isinstance(kind, str) and any(fnmatch.fnmatchcase(kind, p) for p in patterns)
@@ -424,6 +443,15 @@ def global_capture_failure(root):
         return None
 
 
+def mark_global_capture_failure():
+    try:
+        os.makedirs(state_dir(), mode=0o700, exist_ok=True)
+        os.close(os.open(os.path.join(state_dir(), "capture-failed-any"), os.O_WRONLY | os.O_CREAT, 0o600))
+        os.utime(os.path.join(state_dir(), "capture-failed-any"))
+    except OSError:
+        pass
+
+
 def capture_failed(root, session):
     if os.path.exists(capture_marker(root, session["key"])):
         return True
@@ -472,6 +500,11 @@ def prune_session(session):
     if len(uses) > MAX_TOOL_USES:
         for k in sorted(uses, key=lambda k: uses[k]["time"])[: len(uses) - MAX_TOOL_USES]:
             del uses[k]
+    # Exempt creates waiting for their PostToolUse; a failed or refused call never gets one.
+    pending = session.get("readonly_uses", {})
+    if len(pending) > MAX_TOOL_USES:
+        for k in sorted(pending, key=pending.get)[: len(pending) - MAX_TOOL_USES]:
+            del pending[k]
 
 
 # ---------------------------------------------------------------- hook adapter
@@ -549,6 +582,9 @@ def handle_hook(payload, host_flag, store):
     session_id = payload.get("session_id")
 
     if event == "PreToolUse" and payload.get("tool_name") not in WORK_TOOLS:
+        return None
+    if event == "PostToolUse":
+        post_tool_use(payload, host, store)
         return None
     if event not in ("PreToolUse", "UserPromptSubmit", "SessionStart"):
         return None
@@ -649,20 +685,19 @@ def pre_tool_use(payload, host, session, store):
     # Read-only agent types run untouched: no proposal, no grant, nothing to
     # replay. This comes before grant matching, or an open grant for another
     # Agent call would be spent replaying that call in place of this one.
-    # Follow-up messages to a named read-only agent pass too: routing them
-    # elsewhere would throw away the context it built.
-    readonly = session.setdefault("readonly_agents", [])
-    name = tool_input.get("name") if isinstance(tool_input.get("name"), str) else ""
-    if operation == "create" and name in readonly and not is_readonly_agent(tool, operation, tool_input, readonly_agents()):
-        readonly.remove(name)  # the name now belongs to an agent that can write
-    if host == "claude" and (
-            is_readonly_agent(tool, operation, tool_input, readonly_agents())
-            or (operation == "continue" and tool == "SendMessage" and target in readonly)):
-        if operation == "create" and name and name not in readonly:
-            readonly.append(name)
-            del readonly[:-MAX_PROPOSALS]
+    # Follow-up messages to a read-only agent pass too, by id: routing them
+    # elsewhere would throw away the context it built. The id is remembered
+    # only once the host ran the exempted call (post_tool_use).
+    exempt_create = is_readonly_agent(tool, operation, tool_input, readonly_agents())
+    session.pop("readonly_agents", None)  # names remembered before follow-ups went id-only
+    if operation == "create" and not exempt_create:
+        forget_readonly_id(session, tool_input.get("name"))
+    if host == "claude" and (exempt_create or readonly_follow_up(tool, tool_input, session)):
+        if exempt_create and tool_use_id:
+            session.setdefault("readonly_uses", {})[tool_use_id] = now()
         store.audit(event="allow_readonly", session=key, tool=tool,
                     subagent_type=tool_input.get("subagent_type"), target=target)
+        prune_session(session)
         store.save_session(session)
         return None
 
@@ -709,6 +744,7 @@ def pre_tool_use(payload, host, session, store):
         usable.sort(key=lambda p: (p["digest"] != digest, p["created"]))
         p = usable[0]
         p["status"] = "consumed"
+        forget_readonly_id(session, p["tool_input"].get("name"))  # the replayed input is what runs
         p["consumed"] = {"time": now(), "tool_use_id": tool_use_id, "input_matched": input_digest(tool_input) == p["digest"]}
         # Only the probe-verified output shape: no reason alongside updatedInput.
         output = pre_tool_output("allow", updated_input=p["tool_input"])
@@ -728,10 +764,81 @@ def pre_tool_use(payload, host, session, store):
     return remember(output, proposal_id)
 
 
+def forget_readonly_id(session, name):
+    """A possibly writing agent named like a read-only agent's id: the string
+    could now resolve to the writer, so it stops being an exempt target."""
+    ids = session.get("readonly_ids", [])
+    if isinstance(name, str) and name in ids:
+        ids.remove(name)
+
+
+def readonly_follow_up(tool, tool_input, session):
+    """A plain SendMessage to a remembered read-only agent, addressed by id: the
+    host sets recipient_kind "agent" for an id (verified live, 2.1.296). Every
+    target field present must name that same agent."""
+    if tool != "SendMessage" or tool_input.get("recipient_kind") != "agent":
+        return False
+    if tool_input.get("type") not in (None, "message"):
+        return False
+    values = [tool_input[f] for f in ("to",) + TARGET_FALLBACKS if f in tool_input]
+    if not values or not all(isinstance(v, str) for v in values) or len(set(values)) != 1:
+        return False
+    return values[0] in session.get("readonly_ids", [])
+
+
+def post_tool_use(payload, host, store):
+    """Remember the id of an agent the PreToolUse hook exempted, so a follow-up
+    to it passes. Never answers the host: PostToolUse cannot undo the
+    call, and a broken hook must stay silent here."""
+    tool = payload.get("tool_name")
+    session_id = payload.get("session_id")
+    tool_use_id = payload.get("tool_use_id")
+    if host != "claude" or tool not in READONLY_CREATE_TOOLS or not isinstance(session_id, str) or not session_id:
+        return
+    if not isinstance(tool_use_id, str) or not tool_use_id:
+        return
+    key = session_key(host, session_id)
+    # Every Agent call reaches here: look without the lock first, so unrelated
+    # ones never contend with PreToolUse hooks in other sessions.
+    try:
+        peek = store.load_session(key)
+    except RoutingError:
+        return
+    if not peek or tool_use_id not in peek.get("readonly_uses", {}):
+        return
+    try:
+        with store:
+            observe_host(store, host, "PostToolUse")  # doctor's evidence that this hook fires
+            session = store.load_session(key)
+            if not session or session.get("readonly_uses", {}).pop(tool_use_id, None) is None:
+                return
+            tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+            response = payload.get("tool_response") if isinstance(payload.get("tool_response"), dict) else {}
+            agent_id = response.get("agentId")
+            ran = response.get("agentType", tool_input.get("subagent_type"))
+            # Re-check what ran: another PreToolUse hook may have rewritten the input.
+            if not (is_readonly_agent(tool, "create", tool_input, readonly_agents())
+                    and ran == tool_input.get("subagent_type")):
+                store.audit(event="readonly_not_registered", session=key, tool_use_id=tool_use_id, reason="type changed")
+                store.save_session(session)
+                return
+            if isinstance(agent_id, str) and AGENT_ID_RE.fullmatch(agent_id):
+                ids = session.setdefault("readonly_ids", [])
+                if agent_id in ids:
+                    ids.remove(agent_id)
+                ids.append(agent_id)
+                del ids[:-MAX_READONLY_AGENTS]
+                store.audit(event="readonly_registered", session=key, tool_use_id=tool_use_id, agent=agent_id)
+            store.save_session(session)
+    except RoutingError as e:
+        store.audit(event="readonly_register_failed", session=key, tool_use_id=tool_use_id, error=str(e))
+
+
 def observe_host(store, host, event):
     data = store.load_hosts()
     entry = data["hosts"].setdefault(host, {"events": 0})
     entry.update({"last_event": event, "last_seen": now(), "runtime": runtime_identity(), "runtime_path": self_path()})
+    entry.setdefault("seen", {})[event] = now()
     entry["events"] += 1
     store.save_hosts(data)
 
@@ -745,16 +852,25 @@ def run_hook(host_flag, stdin_text, store=None):
     except Exception:  # noqa: BLE001 - ValueError, RecursionError on hostile nesting
         return failure_output(stdin_text, "hook input is not valid JSON")
     try:
-        return handle_hook(payload, host_flag, store)
+        output = handle_hook(payload, host_flag, store)
     except Exception as e:  # noqa: BLE001 - every failure must still answer the host
-        return failure_output(payload, f"{type(e).__name__}: {e}" if not isinstance(e, RoutingError) else str(e))
+        output = failure_output(payload, f"{type(e).__name__}: {e}" if not isinstance(e, RoutingError) else str(e))
+    # Only a PreToolUse ever gets an answer, whatever a branch above returns.
+    return output if isinstance(payload, dict) and payload.get("hook_event_name") == "PreToolUse" else None
+
+
+# The event key as JSON writes it. Its quotes are bare, so it cannot come from
+# inside a string value; a value that is just an event name ("PostToolUse")
+# can, which is why the bare word is never matched.
+PRE_TOOL_USE_KEY = re.compile(r'"hook_event_name"\s*:\s*"PreToolUse"')
+USER_INPUT_KEY = re.compile(r'"hook_event_name"\s*:\s*"(UserPromptSubmit|SessionStart)"')
 
 
 def failure_output(payload, message):
     if isinstance(payload, dict):
         if payload.get("hook_event_name") != "PreToolUse" or payload.get("tool_name") not in WORK_TOOLS:
             return None
-    elif not any(f'"{name}"' in payload for name in WORK_TOOLS) or '"PreToolUse"' not in payload:
+    elif not any(f'"{name}"' in payload for name in WORK_TOOLS) or not PRE_TOOL_USE_KEY.search(payload):
         return None
     return pre_tool_output("deny", f"opencode-subagent routing could not evaluate this delegation call: {message}. "
                            "Native delegation stays blocked until this is fixed (opencode-delegate route doctor); "
@@ -1084,8 +1200,19 @@ def host_registrations(home):
             return
         # Local installs invoke the router through route-hook-shim.sh, marked
         # workflow-skills-routing. `route hook` matches older direct registrations.
-        if "route hook" in text or ("route-hook-shim.sh" in text and "workflow-skills-routing" in text):
-            found[host].append({"source": label, "path": path, "mtime": os.path.getmtime(path)})
+        ours = lambda c: "route hook" in c or ("route-hook-shim.sh" in c and "workflow-skills-routing" in c)
+        if label == "plugin":  # plugin commands carry no marker
+            ours = lambda c: "route-hook-shim.sh" in c or "route hook" in c
+        if ours(text):
+            events = set()
+            try:
+                for event, groups in json.loads(text).get("hooks", {}).items():
+                    if any(ours(h.get("command", "")) for g in groups for h in g.get("hooks", [])):
+                        events.add(event)
+            except (ValueError, AttributeError, TypeError):
+                pass
+            found[host].append({"source": label, "path": path, "mtime": os.path.getmtime(path),
+                                "missing_events": [e for e in HOOK_EVENTS[host] if e not in events]})
 
     scan(os.path.join(home, ".claude", "settings.json"), "claude", "local")
     scan(os.path.join(home, ".codex", "hooks.json"), "codex", "local")
@@ -1095,9 +1222,7 @@ def host_registrations(home):
         for name, installs in plugins.items():
             if name.startswith("workflow-skills@"):
                 for inst in installs:
-                    hooks = os.path.join(inst.get("installPath", ""), "hooks", "hooks.json")
-                    if os.path.exists(hooks):
-                        found["claude"].append({"source": "plugin", "path": hooks, "mtime": os.path.getmtime(hooks)})
+                    scan(os.path.join(inst.get("installPath", ""), "hooks", "hooks.json"), "claude", "plugin")
     except (OSError, ValueError, AttributeError):
         pass
     try:
@@ -1164,6 +1289,12 @@ def doctor(store=None, home=None):
         if seen:
             entry["last_seen"] = iso(seen["last_seen"])
             entry["last_event"] = seen["last_event"]
+            entry["events_seen"] = {e: iso(t) for e, t in sorted(seen.get("seen", {}).items())}
+        for r in regs:
+            if r.get("missing_events"):
+                fix = "re-run scripts/install.sh" if r["source"] == "local" else "update the plugin"
+                report["problems"].append(f"{host}: the {r['source']} hook registration lacks "
+                                          f"{', '.join(r['missing_events'])}; {fix}")
         if len(regs) > 1:
             report["problems"].append(f"{host}: {len(regs)} hook registrations ({', '.join(r['source'] for r in regs)}); keep one")
         hosts[host] = entry
@@ -1207,11 +1338,20 @@ def main(argv):
     args = parser.parse_args(argv)
 
     if args.op == "hook":
+        deny = pre_tool_output("deny", "opencode-subagent routing could not read the hook input; native "
+                               "delegation stays blocked. " + REVIEW_NOTE)
         try:
-            output = run_hook(args.host, sys.stdin.read())
-        except Exception:  # noqa: BLE001 - e.g. undecodable stdin; never exit non-zero from a hook
-            output = pre_tool_output("deny", "opencode-subagent routing could not read the hook input; native "
-                                     "delegation stays blocked. " + REVIEW_NOTE)
+            raw = sys.stdin.buffer.read()
+        except Exception:  # noqa: BLE001 - nothing to tell the event by: fail closed
+            raw, output = None, deny
+        if raw is not None:
+            try:
+                output = run_hook(args.host, raw.decode("utf-8"))
+            except Exception:  # noqa: BLE001 - e.g. undecodable stdin; never exit non-zero from a hook
+                text = raw.decode("utf-8", "replace")
+                output = deny if PRE_TOOL_USE_KEY.search(text) else None
+                if output is None and USER_INPUT_KEY.search(text):
+                    mark_global_capture_failure()  # as route-hook-shim.sh does when the router cannot start
         if output is not None:
             print(json.dumps(output))
         return 0

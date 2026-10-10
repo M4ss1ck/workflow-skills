@@ -19,14 +19,18 @@ if [ "$status" -eq 0 ]; then
     '{"hookSpecificOutput"'*) printf '%s\n' "$out"; exit 0 ;;
   esac
 fi
-case "$payload" in
-  *'"UserPromptSubmit"'*|*'"SessionStart"'*)
+# Match the event key, never the bare word: its quotes are bare only at the key,
+# while a tool_input value that is just "PostToolUse" serializes the same as the
+# word. PreToolUse comes first, so a payload carrying it is never let through.
+# Whitespace is stripped first, so any JSON formatting of the key matches.
+case "$(printf '%s' "$payload" | tr -d '[:space:]')" in
+  *'"hook_event_name":"PreToolUse"'*)
+    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"opencode-subagent routing is not runnable from the installed entry point (a checkout without routing, a moved install, or a crash). Native delegation stays blocked; work locally and run opencode-delegate route doctor or re-run scripts/install.sh. If this was a review, do not review your own work instead: tell the user no independent review ran."}}' ;;
+  *'"hook_event_name":"UserPromptSubmit"'*|*'"hook_event_name":"SessionStart"'*)
     # The router never saw this user message, so grants recorded before it must
     # not be usable: leave a timestamp every session checks.
     marker="${XDG_STATE_HOME:-$HOME/.local/state}/workflow-skills/routing/capture-failed-any"
     mkdir -p "$(dirname "$marker")" 2>/dev/null && : >"$marker" 2>/dev/null
     ;;
-  *'"PreToolUse"'*)
-    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"opencode-subagent routing is not runnable from the installed entry point (a checkout without routing, a moved install, or a crash). Native delegation stays blocked; work locally and run opencode-delegate route doctor or re-run scripts/install.sh. If this was a review, do not review your own work instead: tell the user no independent review ran."}}' ;;
 esac
 exit 0

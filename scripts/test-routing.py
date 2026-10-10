@@ -37,6 +37,10 @@ def record_args(**fields):
     return argparse.Namespace(**base)
 
 
+AGENT_ID = "a47b8347f3aeb273e"
+OTHER_ID = "a9737b40bcb8c449b"
+
+
 def rec(**fields):
     return routing.validate_record(record_args(proposal="p", **fields))
 
@@ -82,6 +86,16 @@ class Env(unittest.TestCase):
                    "tool_name": tool, "tool_input": tool_input if tool_input is not None else {"prompt": "read a.txt", "subagent_type": "x"}}
         if tool_use_id:
             payload["tool_use_id"] = tool_use_id
+        payload.update(extra or {})
+        return self.hook(payload)
+
+    def post(self, tool_use_id, tool_input, agent_id=None, tool="Agent", session="s1", response=None, extra=None):
+        """A live-shaped PostToolUse for an Agent call (Claude Code 2.1.296)."""
+        if response is None:
+            response = {"status": "completed", "prompt": tool_input.get("prompt"), "agentId": agent_id,
+                        "agentType": tool_input.get("subagent_type"), "content": [{"type": "text", "text": "done"}]}
+        payload = {"hook_event_name": "PostToolUse", "session_id": session, "cwd": self.worktree, "tool_name": tool,
+                   "tool_input": tool_input, "tool_response": response, "tool_use_id": tool_use_id, "duration_ms": 5}
         payload.update(extra or {})
         return self.hook(payload)
 
@@ -925,20 +939,36 @@ class ReadOnlyAgents(Env):
         self.assertIsNone(self.call(tool_input={"prompt": "look", "subagent_type": "Explore"}))
         self.assertEqual(routing.show(pid, self.store)["status"], "granted")
 
-    def test_follow_ups_to_a_named_readonly_agent_pass(self):
-        self.assertIsNone(self.call(tool_input={"prompt": "look", "subagent_type": "Explore", "name": "scout"}))
-        self.assertIsNone(self.call(tool="SendMessage", tool_input={"to": "scout", "message": "and the lexer?"}))
-        self.assertEqual(self.decision(self.call(tool="SendMessage", tool_input={"to": "other", "message": "go"})), "deny")
-
-    def test_configurable_and_disableable(self):
+    def test_follow_ups_by_name_are_gated(self):
+        # The host allocates and reassigns names (an unnamed agent is registered
+        # under its type), so a name is never proof of a read-only target.
+        explore = {"prompt": "look", "subagent_type": "Explore", "name": "scout"}
+        self.assertIsNone(self.call(tool_input=explore, tool_use_id="tu-scout"))
+        self.assertIsNone(self.post("tu-scout", explore, AGENT_ID))
+        for tool_input in ({"to": "scout", "message": "x"},
+                           {"to": "scout", "recipient": "scout", "recipient_kind": "name", "message": "x"}):
+            with self.subTest(tool_input=tool_input):
+                self.assertEqual(self.decision(self.call(tool="SendMessage", tool_input=tool_input)), "deny")
+    def test_the_key_adds_to_the_builtins(self):
         path = routing.conf_file()
         with open(path, "a") as f:
-            f.write("OPENCODE_SUBAGENT_READONLY_AGENTS=Explore\nOPENCODE_SUBAGENT_READONLY_AGENTS=scout-*, Plan\n")
-        self.assertIsNone(self.call(tool_input={"prompt": "x", "subagent_type": "scout-1"}))
-        self.assertEqual(self.decision(self.call(tool_input={"prompt": "x", "subagent_type": "Explore"})), "deny")
-        with open(path, "a") as f:
+            f.write("OPENCODE_SUBAGENT_READONLY_AGENTS=x-*\nOPENCODE_SUBAGENT_READONLY_AGENTS=scout-*, my-agent\n")
+        for kind in ("scout-1", "my-agent", "Explore", "Plan", "claude-code-guide"):
+            with self.subTest(kind):
+                self.assertIsNone(self.call(tool_input={"prompt": "x", "subagent_type": kind}))
+        for kind in ("x-1", "mini-explorer", "adversarial-reviewer"):  # last line wins; default replaced
+            with self.subTest(kind):
+                self.assertEqual(self.decision(self.call(tool_input={"prompt": "x", "subagent_type": kind})), "deny")
+
+    def test_an_empty_key_leaves_only_the_builtins(self):
+        with open(routing.conf_file(), "a") as f:
             f.write("OPENCODE_SUBAGENT_READONLY_AGENTS=\n")
-        self.assertEqual(self.decision(self.call(tool_input={"prompt": "x", "subagent_type": "Plan"})), "deny")
+        for kind in routing.BUILTIN_READONLY_AGENTS:
+            with self.subTest(kind):
+                self.assertIsNone(self.call(tool_input={"prompt": "x", "subagent_type": kind}))
+        for kind in ("adversarial-reviewer", "mini-explorer", "general-purpose"):
+            with self.subTest(kind):
+                self.assertEqual(self.decision(self.call(tool_input={"prompt": "x", "subagent_type": kind})), "deny")
 
     def test_not_under_policy_off_and_not_for_codex(self):
         self.set_policy("off")
@@ -950,12 +980,172 @@ class ReadOnlyAgents(Env):
                             extra={"turn_id": "t2"})
             self.assertEqual(self.decision(out), "deny", tool)
 
-    def test_a_name_reused_by_a_writing_agent_is_gated_again(self):
-        self.assertIsNone(self.call(tool_input={"prompt": "look", "subagent_type": "Explore", "name": "scout"}))
-        self.grant_native(tool_input={"prompt": "edit", "subagent_type": "general-purpose", "name": "scout"})
-        self.assertEqual(self.decision(self.call(tool_input={"prompt": "x", "subagent_type": "general-purpose",
-                                                             "name": "scout"})), "allow")
-        self.assertEqual(self.decision(self.call(tool="SendMessage", tool_input={"to": "scout", "message": "go"})), "deny")
+
+class ReadOnlyFollowUps(Env):
+    """Follow-ups to an exempt agent, addressed by the host-assigned id that the
+    PostToolUse of the call the hook itself exempted reports."""
+
+    EXPLORE = {"description": "scan", "prompt": "look", "subagent_type": "Explore", "run_in_background": True}
+
+    def setUp(self):
+        super().setUp()
+        self.set_policy("explicit")
+        self.prompt("explore the parser module, use a native agent for the research")
+
+    def by_id(self, agent_id, **extra):
+        tool_input = {"to": agent_id, "recipient": agent_id, "recipient_kind": "agent", "message": "and the lexer?"}
+        tool_input.update(extra)
+        return self.call(tool="SendMessage", tool_input=tool_input)
+
+    def launch(self, tool_use_id="tu-1", tool_input=None, agent_id=AGENT_ID, background=True):
+        tool_input = tool_input or self.EXPLORE
+        self.assertIsNone(self.call(tool_input=tool_input, tool_use_id=tool_use_id))
+        response = ({"isAsync": True, "status": "async_launched", "agentId": agent_id, "description": "scan",
+                     "prompt": "look", "canContinueAgent": True} if background else None)
+        self.assertIsNone(self.post(tool_use_id, tool_input, agent_id, response=response))
+
+    def audit_events(self, kind):
+        path = os.path.join(self.store.root, "audit.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            return [e for e in map(json.loads, f) if e["event"] == kind]
+
+    def test_a_follow_up_by_id_passes_after_a_background_launch(self):
+        self.assertEqual(self.decision(self.by_id(AGENT_ID)), "deny")  # unknown before PostToolUse
+        self.launch()
+        self.assertIsNone(self.by_id(AGENT_ID))
+        self.assertEqual(self.decision(self.by_id(OTHER_ID)), "deny")
+        self.assertEqual([e["agent"] for e in self.audit_events("readonly_registered")], [AGENT_ID])
+
+    def test_a_follow_up_by_id_passes_after_a_foreground_run(self):
+        self.launch(background=False)
+        self.assertIsNone(self.by_id(AGENT_ID))
+
+    def test_a_writing_agent_never_registers(self):
+        writer = {"prompt": "implement it", "subagent_type": "general-purpose", "run_in_background": True}
+        self.grant_native(tool_input=writer)
+        self.assertEqual(self.decision(self.call(tool_input=writer, tool_use_id="tu-w")), "allow")
+        self.assertIsNone(self.post("tu-w", writer, AGENT_ID))
+        self.assertEqual(self.decision(self.by_id(AGENT_ID)), "deny")
+
+    def test_only_a_call_the_hook_exempted_registers(self):
+        # A PostToolUse with no exempt PreToolUse behind it: unknown id, wrong
+        # session, codex, a missing or non-string agentId, a non-dict response.
+        self.assertIsNone(self.post("tu-never-seen", self.EXPLORE, AGENT_ID))
+        self.assertIsNone(self.call(tool_input=self.EXPLORE, tool_use_id="tu-1"))
+        self.assertIsNone(self.post("tu-1", self.EXPLORE, AGENT_ID, session="other"))
+        self.assertIsNone(self.post("tu-1", self.EXPLORE, AGENT_ID, extra={"turn_id": "t"}))
+        for response in ({"status": "completed"}, {"agentId": 7}, {"agentId": ""}, "text", None):
+            with self.subTest(response=response):
+                self.assertIsNone(self.post("tu-1", self.EXPLORE, response=response if response is not None else []))
+        self.assertEqual(self.decision(self.by_id(AGENT_ID)), "deny")
+
+    def test_post_rechecks_the_type_it_ran(self):
+        # Another hook may rewrite the input after this one exempted it.
+        self.assertIsNone(self.call(tool_input=self.EXPLORE, tool_use_id="tu-1"))
+        rewritten = dict(self.EXPLORE, subagent_type="general-purpose")
+        self.assertIsNone(self.post("tu-1", rewritten, AGENT_ID))
+        self.assertEqual(self.decision(self.by_id(AGENT_ID)), "deny")
+        self.assertIsNone(self.call(tool_input=self.EXPLORE, tool_use_id="tu-2"))
+        response = {"status": "completed", "agentId": AGENT_ID, "agentType": "general-purpose"}
+        self.assertIsNone(self.post("tu-2", self.EXPLORE, response=response))
+        self.assertEqual(self.decision(self.by_id(AGENT_ID)), "deny")
+
+    def test_names_and_ids_do_not_cross(self):
+        # A read-only agent named like a writer's id must not open that id.
+        self.launch(tool_input=dict(self.EXPLORE, name=OTHER_ID), agent_id=AGENT_ID)
+        self.assertEqual(self.decision(self.by_id(OTHER_ID)), "deny")
+        self.assertEqual(self.decision(self.call(tool="SendMessage", tool_input={"to": OTHER_ID, "message": "x"})), "deny")
+        # ...and an id is not a name.
+        self.assertEqual(self.decision(self.call(tool="SendMessage", tool_input={
+            "to": AGENT_ID, "recipient": AGENT_ID, "recipient_kind": "name", "message": "x"})), "deny")
+        self.assertIsNone(self.by_id(AGENT_ID))
+
+    def test_a_writer_named_like_a_readonly_id_closes_it(self):
+        # If the host ever resolved that id string to the writer's name, the
+        # follow-up would reach a writer; so the id stops being exempt.
+        self.launch()
+        writer = {"prompt": "implement it", "subagent_type": "general-purpose", "name": AGENT_ID}
+        self.grant_native(tool_input=writer)
+        self.assertEqual(self.decision(self.call(tool_input=writer)), "allow")
+        self.assertEqual(self.decision(self.by_id(AGENT_ID)), "deny")
+
+    def test_only_a_plain_message_by_id_passes(self):
+        self.launch()
+        self.assertIsNone(self.by_id(AGENT_ID, type="message"))
+        for extra in ({"type": "broadcast"}, {"recipient_kind": None}, {"recipient_kind": "name"}):
+            with self.subTest(extra=extra):
+                self.assertEqual(self.decision(self.by_id(AGENT_ID, **extra)), "deny")
+
+    def test_disagreeing_target_fields_are_not_exempt(self):
+        self.launch()
+        self.assertEqual(self.decision(self.by_id(AGENT_ID, recipient=OTHER_ID)), "deny")
+        self.assertEqual(self.decision(self.by_id(AGENT_ID, recipient_kind="team")), "deny")
+
+    def test_a_non_string_target_gets_a_proposal_not_a_crash(self):
+        self.launch()
+        for value in ({"kind": "name", "value": "bob"}, ["bob"], 7, None):
+            with self.subTest(value=value):
+                out = self.call(tool="SendMessage", tool_input={"to": AGENT_ID, "recipient": value, "message": "x"})
+                self.assertEqual(self.decision(out), "deny")
+                self.proposal_of(out)
+
+    def test_policy_off_gates_follow_ups_too(self):
+        self.launch()
+        self.set_policy("off")
+        self.assertEqual(self.decision(self.by_id(AGENT_ID)), "deny")
+
+    def test_duplicate_post_delivery_is_harmless(self):
+        self.launch()
+        self.assertIsNone(self.post("tu-1", self.EXPLORE, AGENT_ID))
+        self.assertIsNone(self.by_id(AGENT_ID))
+        self.assertEqual(len(self.audit_events("readonly_registered")), 1)
+
+    def test_state_stays_bounded(self):
+        for i in range(routing.MAX_TOOL_USES + 30):  # exempt creates whose PostToolUse never came
+            self.assertIsNone(self.call(tool_input=self.EXPLORE, tool_use_id=f"tu-{i}"))
+        for i in range(routing.MAX_READONLY_AGENTS + 10):
+            self.launch(tool_use_id=f"tu-l{i}", agent_id=f"a{i:017x}")
+        for i in range(5):  # exempt follow-ups record nothing to wait for
+            self.assertIsNone(self.by_id(f"a{routing.MAX_READONLY_AGENTS + 9:017x}"))
+        session = self.store.load_session(routing.session_key("claude", "s1"))
+        self.assertLessEqual(len(session["readonly_uses"]), routing.MAX_TOOL_USES)
+        self.assertEqual(len(session["readonly_ids"]), routing.MAX_READONLY_AGENTS)
+        self.assertEqual(self.decision(self.by_id(f"a{0:017x}")), "deny")  # oldest evicted: fails closed
+
+    def test_post_tool_use_never_answers(self):
+        broken = [
+            {"hook_event_name": "PostToolUse", "tool_name": "Agent", "tool_input": {}},  # no session
+            {"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "Agent", "tool_input": "x"},
+            {"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "SendMessage", "tool_input": {}},
+            '{"hook_event_name":"PostToolUse","tool_name":"Agent","tool_input":{"description":"PreToolUse"',
+            '{"hook_event_name": "PostToolUse", "tool_name": "Agent", "x": "\\"PreToolUse\\"",',
+        ]
+        for payload in broken:
+            with self.subTest(payload=payload):
+                self.assertIsNone(self.hook(payload))
+        os.makedirs(self.store.root, exist_ok=True)
+        with open(self.store.session_path(routing.session_key("claude", "s1")), "w") as f:
+            f.write("{broken")
+        self.assertIsNone(self.post("tu-1", self.EXPLORE, AGENT_ID))
+
+    def test_post_for_an_unrelated_call_takes_no_lock(self):
+        with self.store:  # another process holds the lock
+            start = time.monotonic()
+            self.assertIsNone(self.post("tu-unrelated", self.EXPLORE, AGENT_ID))
+            self.assertLess(time.monotonic() - start, 1.0)
+
+    def test_a_lock_timeout_on_post_is_audited(self):
+        self.assertIsNone(self.call(tool_input=self.EXPLORE, tool_use_id="tu-1"))
+        old = routing.LOCK_WAIT_SECONDS
+        routing.LOCK_WAIT_SECONDS = 0.05
+        try:
+            with routing.Store(self.store.root):
+                self.assertIsNone(self.post("tu-1", self.EXPLORE, AGENT_ID))
+        finally:
+            routing.LOCK_WAIT_SECONDS = old
+        self.assertEqual(len(self.audit_events("readonly_register_failed")), 1)
 
 
 class Entrypoint(Env):
@@ -988,6 +1178,45 @@ class Entrypoint(Env):
         out = self.run_route(["route", "identity"], via=a)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(json.loads(out.stdout)["path"], routing.self_path())
+
+    def test_fallbacks_key_on_the_event_field_not_a_bare_word(self):
+        # A tool_input value that is exactly an event name serializes with bare
+        # quotes; it must not make a delegation call pass as another event.
+        env = {"OPENCODE_DELEGATE_PYTHON": "python-does-not-exist"}
+        for word in ("PostToolUse", "UserPromptSubmit", "SessionStart"):
+            for sep in (":", ": ", " :\n\t"):
+                payload = ('{"hook_event_name"' + sep + '"PreToolUse","tool_name":"Agent",'
+                           '"tool_input":{"description":"' + word + '"}}')
+                with self.subTest(word=word, sep=sep):
+                    out = self.run_route(["route", "hook"], stdin=payload, env_extra=env)
+                    self.assertEqual(json.loads(out.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+        payload = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Agent", "tool_input": {"description": "PreToolUse"}},
+                             separators=(",", ":"))
+        out = self.run_route(["route", "hook"], stdin=payload, env_extra=env)
+        self.assertEqual((out.returncode, out.stdout), (0, ""))
+
+    def test_undecodable_input_denies_only_a_pre_tool_use(self):
+        # An unreadable user message still retires earlier grants: only it leaves the marker.
+        marker = os.path.join(self.store.root, "capture-failed-any")
+        for event, expect in (("PreToolUse", "deny"), ("PostToolUse", None), ("UserPromptSubmit", None)):
+            raw = b'{"hook_event_name":"' + event.encode() + b'","tool_name":"Agent","tool_input":{"prompt":"\xff"}}'
+            out = subprocess.run([BASH, DELEGATE, "route", "hook", "--host", "claude"], input=raw, capture_output=True,
+                                 env=os.environ, cwd="/")
+            with self.subTest(event):
+                self.assertEqual(out.returncode, 0)
+                self.assertEqual(os.path.exists(marker), event == "UserPromptSubmit")
+                if expect:
+                    self.assertEqual(json.loads(out.stdout)["hookSpecificOutput"]["permissionDecision"], expect)
+                else:
+                    self.assertEqual(out.stdout, b"")
+
+    def test_an_unreadable_stdin_denies(self):
+        # With no input there is no event to tell by, so it is denied: a
+        # PreToolUse must not pass, and a deny on PostToolUse changes nothing.
+        out = subprocess.run([BASH, "-c", f'exec 0<&-; "{BASH}" "{DELEGATE}" route hook --host claude'],
+                             capture_output=True, text=True, cwd="/")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_missing_interpreter_fails_closed_for_delegation_only(self):
         env = {"OPENCODE_DELEGATE_PYTHON": "python-does-not-exist"}
@@ -1053,6 +1282,37 @@ class Entrypoint(Env):
         self.assertEqual(report["hosts"]["codex"]["status"], "installed-unverified")
 
 
+    def test_doctor_flags_a_registration_missing_an_event(self):
+        # A symlink install updates the router in place; settings written by an
+        # older install.sh lack PostToolUse, so follow-ups by id stay gated.
+        home = os.path.join(self.tmp, "stale-home")
+        command = "/usr/bin/bash /x/route-hook-shim.sh /x/delegate.sh {} # workflow-skills-routing"
+        for host, path in (("claude", (".claude", "settings.json")), ("codex", (".codex", "hooks.json"))):
+            os.makedirs(os.path.join(home, path[0]))
+            with open(os.path.join(home, *path), "w") as f:
+                json.dump({"hooks": {e: [{"hooks": [{"type": "command", "command": command.format(host)}]}]
+                                     for e in ("UserPromptSubmit", "SessionStart", "PreToolUse")}}, f)
+        plugin = os.path.join(home, "plugin", "hooks")
+        os.makedirs(plugin)
+        shutil.copy(os.path.join(REPO, "hooks", "hooks.json"), plugin)
+        os.makedirs(os.path.join(home, ".claude", "plugins"))
+        with open(os.path.join(home, ".claude", "plugins", "installed_plugins.json"), "w") as f:
+            json.dump({"plugins": {"workflow-skills@x": [{"installPath": os.path.dirname(plugin)}]}}, f)
+        report = routing.doctor(self.store, home)
+        self.assertEqual(report["hosts"]["claude"]["registrations"][1]["missing_events"], [])
+        with open(os.path.join(plugin, "hooks.json")) as f:
+            stale = json.load(f)
+        del stale["hooks"]["PostToolUse"]
+        with open(os.path.join(plugin, "hooks.json"), "w") as f:
+            json.dump(stale, f)
+        report = routing.doctor(self.store, home)
+        self.assertIn("claude: the plugin hook registration lacks PostToolUse; update the plugin", report["problems"])
+        self.assertEqual(report["hosts"]["claude"]["registrations"][0]["missing_events"], ["PostToolUse"])
+        self.assertEqual(report["hosts"]["codex"]["registrations"][0]["missing_events"], [])
+        self.assertIn("claude: the local hook registration lacks PostToolUse; re-run scripts/install.sh", report["problems"])
+        self.assertFalse([p for p in report["problems"] if p.startswith("codex:") and "lacks" in p])
+
+
 PLUGIN_HOOKS = {"hooks.json": ("CLAUDE_PLUGIN_ROOT", "claude"), "codex-hooks.json": ("PLUGIN_ROOT", "codex")}
 
 
@@ -1068,7 +1328,23 @@ class HooksConfig(unittest.TestCase):
         with open(os.path.join(REPO, ".codex-plugin", "plugin.json")) as f:
             self.assertEqual(json.load(f)["hooks"], "./hooks/codex-hooks.json")
         shape = lambda c: {e: [g.get("matcher") for g in gs] for e, gs in c["hooks"].items()}
-        self.assertEqual(shape(self.configs["hooks.json"]), shape(self.configs["codex-hooks.json"]))
+        claude, codex = shape(self.configs["hooks.json"]), shape(self.configs["codex-hooks.json"])
+        self.assertEqual({e: m for e, m in claude.items() if e in codex}, codex)
+        self.assertEqual(set(claude) - set(codex), set(routing.CLAUDE_ONLY_EVENTS))
+
+    def test_router_knows_the_registered_events(self):
+        for name, (var, host) in PLUGIN_HOOKS.items():
+            self.assertEqual(set(self.configs[name]["hooks"]), set(routing.HOOK_EVENTS[host]), name)
+
+    def test_post_tool_use_matcher_covers_only_readonly_create_tools(self):
+        (group,) = self.config["hooks"]["PostToolUse"]
+        matcher = re.compile(group["matcher"])
+        for tool in routing.WORK_TOOLS:
+            self.assertEqual(bool(matcher.search(tool)), tool in routing.READONLY_CREATE_TOOLS, tool)
+        for tool in ("Bash", "AgentX", "mcp__s__Agent", "TaskOutput"):
+            self.assertFalse(matcher.search(tool), tool)
+        self.assertEqual({t for t, (op, _) in routing.WORK_TOOLS.items() if t in routing.READONLY_CREATE_TOOLS and op == "create"},
+                         set(routing.READONLY_CREATE_TOOLS))
 
     def test_matcher_covers_every_work_tool_and_nothing_else(self):
         (group,) = self.config["hooks"]["PreToolUse"]
@@ -1080,8 +1356,8 @@ class HooksConfig(unittest.TestCase):
 
     def test_commands_route_through_the_plugin_entrypoint(self):
         for name, (var, host) in PLUGIN_HOOKS.items():
-            for event in ("UserPromptSubmit", "SessionStart", "PreToolUse"):
-                for group in self.configs[name]["hooks"][event]:
+            for event, groups in self.configs[name]["hooks"].items():
+                for group in groups:
                     for handler in group["hooks"]:
                         self.assertEqual(handler["type"], "command")
                         self.assertEqual(handler["command"], f'bash "${{{var}}}/skills/opencode-subagent/scripts/route-hook-shim.sh" '
@@ -1109,10 +1385,17 @@ class HooksConfig(unittest.TestCase):
                 out = subprocess.run(["sh", "-c", handler], input=prompt, capture_output=True, text=True, env=env, cwd="/")
                 self.assertEqual((out.returncode, out.stdout), (0, ""), (name, out.stderr))
                 self.assertTrue(os.path.exists(os.path.join(root, "workflow-skills", "routing", "capture-failed-any")), name)
-                payload = json.dumps({"hook_event_name": "PreToolUse", "session_id": "x", "tool_name": "Agent", "tool_input": {}})
+                for word, indent in (("", None), ("PostToolUse", None), ("UserPromptSubmit", None),
+                                     ("SessionStart", None), ("SessionStart", "\t")):
+                    payload = json.dumps({"hook_event_name": "PreToolUse", "session_id": "x", "tool_name": "Agent",
+                                          "tool_input": {"description": word}}, separators=(",", " :  "), indent=indent)
+                    out = subprocess.run(["sh", "-c", handler], input=payload, capture_output=True, text=True, env=env, cwd="/")
+                    self.assertEqual(out.returncode, 0, name)
+                    self.assertEqual(json.loads(out.stdout)["hookSpecificOutput"]["permissionDecision"], "deny", (name, word))
+                payload = json.dumps({"hook_event_name": "PostToolUse", "session_id": "x", "tool_name": "Agent",
+                                      "tool_input": {"description": "PreToolUse"}}, separators=(",", ":"))
                 out = subprocess.run(["sh", "-c", handler], input=payload, capture_output=True, text=True, env=env, cwd="/")
-                self.assertEqual(out.returncode, 0, name)
-                self.assertEqual(json.loads(out.stdout)["hookSpecificOutput"]["permissionDecision"], "deny", name)
+                self.assertEqual((out.returncode, out.stdout), (0, ""), name)
             finally:
                 shutil.rmtree(root)
 
@@ -1154,10 +1437,13 @@ class Fixtures(Env):
                 case = json.load(f)
             with self.subTest(fixture=name):
                 for event in case["events"]:
+                    expect = event.pop("expect", None)
                     self.assertTrue(event.get("cwd"), "live payloads carry cwd")
                     out = self.hook(event)
                     if event["hook_event_name"] != "PreToolUse" or event["tool_name"] not in routing.WORK_TOOLS:
                         self.assertIsNone(out)
+                    elif expect == "pass":  # read-only, or a follow-up to one
+                        self.assertIsNone(out, event)
                     else:
                         self.assertEqual(self.decision(out), "deny")
                         self.assertTrue(self.proposal_of(out).startswith(case["host"] + "-"))

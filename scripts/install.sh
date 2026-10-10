@@ -314,10 +314,12 @@ hooks_file_for() {
 }
 
 # merge_hooks HOST ACTION PYTHON [ENTRY [MARKER TEMPLATE SHIM]]: the last three
-# default to the routing hooks; context-watch passes its own.
+# default to the routing hooks (each host's plugin hook file, so a local install
+# registers the same events as the plugin); context-watch passes its own.
 merge_hooks() {
-  local host="$1" action="$2" python="$3" entry="${4:-}"
-  local marker="${5:-$hooks_marker}" template="${6:-$repo_root/hooks/hooks.json}" shim="${7:-$hook_shim}"
+  local host="$1" action="$2" python="$3" entry="${4:-}" routing_template="$repo_root/hooks/hooks.json"
+  [ "$host" = codex ] && routing_template="$repo_root/hooks/codex-hooks.json"
+  local marker="${5:-$hooks_marker}" template="${6:-$routing_template}" shim="${7:-$hook_shim}"
   local bash_path
   bash_path="$(command -v bash)"
   "$python" - "$(hooks_file_for "$host")" "$action" "$host" "$marker" "$python" "$bash_path" "$entry" "$template" "$shim" "$cw_marker" <<'PY'

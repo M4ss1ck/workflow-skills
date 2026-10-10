@@ -144,7 +144,7 @@ The router computes the route; you only supply facts. How it decides:
 | research or review with `--native-reason needs-host-tools` | `native` (an unauthorized review under `explicit`: `clarify`, ask the user; unauthorized research was already `local`) |
 | research or review | `opencode` researcher (a review even when nobody authorized delegation: it needs a reviewer who is not the author) |
 
-Agent types that are read-only by name skip routing entirely: `Explore`, `Plan`, `claude-code-guide`, `*-reviewer`, `*-explorer` by default, and follow-up `SendMessage` calls to such an agent created with a `name` (give read-only agents a `name` if you will message them again: a follow-up addressed by agent id is gated, because the hook never sees the id the host assigns). Change the list with `OPENCODE_SUBAGENT_READONLY_AGENTS` (patterns separated by spaces or commas; an empty value turns the bypass off). It is a name allowlist, not a sandbox: an agent definition in a checkout can call itself `x-reviewer` and still have write tools. Not under policy `off`, and Claude Code only.
+Read-only agent types skip routing entirely: no proposal, no grant, one `allow_readonly` audit entry. `Explore`, `Plan` and `claude-code-guide` always do. `OPENCODE_SUBAGENT_READONLY_AGENTS` adds patterns to them (separated by spaces or commas; default `*-reviewer *-explorer`; an empty value leaves only those three). A follow-up `SendMessage` to such an agent passes too, once its create call has returned, when addressed by the agent id the host returned. A follow-up by name is gated: the host assigns and reuses names, so a name can come to mean a writing agent. Follow-ups need the `PostToolUse` routing hook: if `opencode-delegate route doctor` says a registration lacks it, re-run `scripts/install.sh` (local install) or update the plugin. An existing `OPENCODE_SUBAGENT_READONLY_AGENTS=` with no value used to turn the bypass off; it now keeps the three built-ins. It is a name allowlist, not a sandbox, built-ins included: an agent definition in a checkout can call itself `x-reviewer` and still have write tools. Not under policy `off`, and Claude Code only.
 
 Rules:
 
@@ -384,7 +384,7 @@ The researcher has the same reporting contract, with its findings written above 
 OPENCODE_SUBAGENT_DELEGATION_POLICY=auto
 OPENCODE_SUBAGENT_MODEL=provider/some-cheap-coding-model
 OPENCODE_SUBAGENT_RESEARCH_MODEL=provider/some-cheap-model
-OPENCODE_SUBAGENT_READONLY_AGENTS=Explore Plan claude-code-guide *-reviewer *-explorer
+OPENCODE_SUBAGENT_READONLY_AGENTS=*-reviewer *-explorer
 OPENCODE_SUBAGENT_STALL_SECONDS=300
 OPENCODE_SUBAGENT_RETENTION_DAYS=90
 OPENCODE_SUBAGENT_RAW_RETENTION_DAYS=7
