@@ -1,0 +1,158 @@
+{
+  "host": "claude",
+  "source": "live probes of Claude Code 2.1.296, 2026-10-10: a background Explore and a foreground user-defined adversarial-reviewer with their PostToolUse payloads (foreground PreToolUse rebuilt from its PostToolUse input), and a SendMessage addressed by the returned agent id (reused for the second agent); UserPromptSubmit synthesized; the last event is a copy addressed to an unknown id; paths and long fields trimmed",
+  "events": [
+    {
+      "session_id": "claude-readonly-session",
+      "permission_mode": "default",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "Fixture prompt: explore in the background, then follow up by id.",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt"
+    },
+    {
+      "session_id": "claude-readonly-session",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Agent",
+      "tool_input": {
+        "description": "Read sentinel file",
+        "prompt": "Read ./sentinel.txt and report its contents.",
+        "subagent_type": "Explore",
+        "run_in_background": true
+      },
+      "tool_use_id": "toolu_01XSAA95NTvbLYkZj66R1Daf",
+      "expect": "pass"
+    },
+    {
+      "session_id": "claude-readonly-session",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt",
+      "permission_mode": "default",
+      "hook_event_name": "PostToolUse",
+      "tool_name": "Agent",
+      "tool_input": {
+        "description": "Read sentinel file",
+        "prompt": "Read ./sentinel.txt and report its contents.",
+        "subagent_type": "Explore",
+        "run_in_background": true
+      },
+      "tool_response": {
+        "isAsync": true,
+        "status": "async_launched",
+        "agentId": "a47b8347f3aeb273e",
+        "description": "Read sentinel file",
+        "resolvedModel": "fixture-model",
+        "prompt": "Read ./sentinel.txt and report its contents.",
+        "canReadOutputFile": true,
+        "canContinueAgent": true
+      },
+      "tool_use_id": "toolu_01XSAA95NTvbLYkZj66R1Daf",
+      "duration_ms": 5
+    },
+    {
+      "session_id": "claude-readonly-session",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "SendMessage",
+      "tool_input": {
+        "to": "a47b8347f3aeb273e",
+        "summary": "Ask agent to also list directory",
+        "message": "also list the directory",
+        "type": "message",
+        "recipient": "a47b8347f3aeb273e",
+        "recipient_kind": "agent",
+        "content": "also list the directory"
+      },
+      "tool_use_id": "toolu_01FegFUuDATNin5kMrd4RXip",
+      "expect": "pass"
+    },
+    {
+      "session_id": "claude-readonly-session",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt",
+      "permission_mode": "default",
+      "tool_name": "Agent",
+      "tool_input": {
+        "description": "Probe sentinel read",
+        "prompt": "Read ./sentinel.txt and reply with only its contents. No review needed.",
+        "subagent_type": "adversarial-reviewer",
+        "run_in_background": false
+      },
+      "tool_use_id": "toolu_018W7cwn71guA4pbd761SWxi",
+      "hook_event_name": "PreToolUse",
+      "expect": "pass"
+    },
+    {
+      "session_id": "claude-readonly-session",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt",
+      "permission_mode": "default",
+      "hook_event_name": "PostToolUse",
+      "tool_name": "Agent",
+      "tool_input": {
+        "description": "Probe sentinel read",
+        "prompt": "Read ./sentinel.txt and reply with only its contents. No review needed.",
+        "subagent_type": "adversarial-reviewer",
+        "run_in_background": false
+      },
+      "tool_response": {
+        "status": "completed",
+        "prompt": "Read ./sentinel.txt and reply with only its contents. No review needed.",
+        "agentId": "afaf7df035edb0d00",
+        "agentType": "adversarial-reviewer",
+        "content": [
+          {
+            "type": "text",
+            "text": "sentinel-42"
+          }
+        ],
+        "canContinueAgent": true
+      },
+      "tool_use_id": "toolu_018W7cwn71guA4pbd761SWxi",
+      "duration_ms": 4432
+    },
+    {
+      "session_id": "claude-readonly-session",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "SendMessage",
+      "tool_input": {
+        "to": "afaf7df035edb0d00",
+        "summary": "Ask agent to also list directory",
+        "message": "also list the directory",
+        "type": "message",
+        "recipient": "afaf7df035edb0d00",
+        "recipient_kind": "agent",
+        "content": "also list the directory"
+      },
+      "tool_use_id": "toolu_fixture_fg_followup",
+      "expect": "pass"
+    },
+    {
+      "session_id": "claude-readonly-session",
+      "cwd": "/fixture/work",
+      "prompt_id": "fixture-prompt",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "SendMessage",
+      "tool_input": {
+        "to": "a0000000000000000",
+        "summary": "Ask agent to also list directory",
+        "message": "also list the directory",
+        "type": "message",
+        "recipient": "a0000000000000000",
+        "recipient_kind": "agent",
+        "content": "also list the directory"
+      },
+      "tool_use_id": "toolu_fixture_other",
+      "expect": "deny"
+    }
+  ]
+}

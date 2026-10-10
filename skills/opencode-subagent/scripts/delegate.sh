@@ -126,8 +126,9 @@ if [ "${1:-}" = "route" ]; then
     if [ "${1:-}" = "hook" ]; then
       # No interpreter means no router: fail closed for delegation calls only.
       payload="$(cat)"
-      case "$payload" in
-        *'"PreToolUse"'*)
+      # The event key, never the bare word, with whitespace stripped so any formatting matches.
+      case "$(printf '%s' "$payload" | tr -d '[:space:]')" in
+        *'"hook_event_name":"PreToolUse"'*)
           printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"opencode-subagent routing cannot run: its Python interpreter was not found. Native delegation stays blocked; run opencode-delegate route doctor. If this was a review, do not review your own work instead: tell the user no independent review ran."}}' ;;
       esac
       exit 0

@@ -169,11 +169,13 @@ JSON
 out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null)"
 echo "$out" | grep -q 'new Claude Code session' || fail "claude hook install did not print reload steps: $out"
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
-[ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "expected 3 owned claude hook entries after rerun: $(hook_commands "$settings")"
+[ "$(hook_commands "$settings" | wc -l)" -eq 4 ] || fail "expected 4 owned claude hook entries after rerun: $(hook_commands "$settings")"
 grep -q 'echo unrelated' "$settings" || fail "unrelated claude hook was lost"
 grep -q '"keep-me"' "$settings" || fail "unrelated claude setting was lost"
 python3 -c "import json,re,sys; d=json.load(open(sys.argv[1])); m=[g['matcher'] for g in d['hooks']['PreToolUse'] if 'matcher' in g and 'workflow' in g['hooks'][0]['command']]; assert m and re.search(m[0],'Agent'), m" "$settings" \
   || fail "claude PreToolUse matcher missing"
+python3 -c "import json,re,sys; d=json.load(open(sys.argv[1])); m=[g['matcher'] for g in d['hooks']['PostToolUse'] if 'workflow-skills-routing' in g['hooks'][0]['command']]; assert m and re.search(m[0],'Agent') and not re.search(m[0],'SendMessage'), m" "$settings" \
+  || fail "claude PostToolUse matcher missing"
 
 # the registered command runs without PATH help and denies an unrecorded Agent call
 cmd="$(hook_commands "$settings" | head -1)"
@@ -215,7 +217,7 @@ mv "$settings" "$tmp_root/settings.backup.json"
 ln -s "$dotfiles/settings.json" "$settings"
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
 [ -L "$settings" ] || fail "symlinked settings.json was replaced by a regular file"
-[ "$(hook_commands "$dotfiles/settings.json" | wc -l)" -eq 3 ] || fail "hooks not written through the settings symlink"
+[ "$(hook_commands "$dotfiles/settings.json" | wc -l)" -eq 4 ] || fail "hooks not written through the settings symlink"
 [ "$(stat -c %a "$dotfiles/settings.json")" = 640 ] || fail "settings.json mode changed: $(stat -c %a "$dotfiles/settings.json")"
 rm "$settings"
 mv "$tmp_root/settings.backup.json" "$settings"
@@ -253,6 +255,8 @@ rm -rf "$tmp_home/.claude/plugins"
 out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent codex </dev/null)"
 echo "$out" | grep -q 'trust' || fail "codex trust step not printed: $out"
 [ "$(hook_commands "$tmp_home/.codex/hooks.json" | wc -l)" -eq 3 ] || fail "expected 3 codex hook entries"
+python3 -c "import json,sys; assert 'PostToolUse' not in json.load(open(sys.argv[1]))['hooks']" "$tmp_home/.codex/hooks.json" \
+  || fail "codex registered the claude-only PostToolUse hook"
 hook_commands "$tmp_home/.codex/hooks.json" | head -1 | grep -q -- 'delegate.sh codex # workflow-skills-routing' || fail "codex hook does not pass host codex"
 
 # no python3: hooks are reported as not installed instead of half-written
@@ -330,7 +334,7 @@ echo "$out" | grep -q 'context-watch asks Claude to wrap up past 200k' || fail "
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
 [ "$(cw_commands "$settings" | wc -l)" -eq 3 ] || fail "expected 3 context-watch entries after rerun: $(cw_commands "$settings")"
 [ "$(cw_commands "$settings" | sort -u | wc -l)" -eq 1 ] || fail "context-watch events run different commands"
-[ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "context-watch disturbed the routing entries"
+[ "$(hook_commands "$settings" | wc -l)" -eq 4 ] || fail "context-watch disturbed the routing entries"
 for event in UserPromptSubmit PostToolUse PostToolUseFailure; do
   python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert any('context-watch' in h['command'] for g in d['hooks'][sys.argv[2]] for h in g['hooks'])" "$settings" "$event" \
     || fail "context-watch is not a $event hook"
@@ -352,7 +356,7 @@ set -e
 # --remove-context-watch takes only context-watch; --remove-hooks takes both
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --remove-context-watch </dev/null >/dev/null
 [ -z "$(cw_commands "$settings")" ] || fail "--remove-context-watch left the entry"
-[ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "--remove-context-watch removed routing entries"
+[ "$(hook_commands "$settings" | wc -l)" -eq 4 ] || fail "--remove-context-watch removed routing entries"
 out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --remove-context-watch </dev/null)"
 echo "$out" | grep -q 'no context-watch hook to remove' || fail "second --remove-context-watch was not a no-op: $out"
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null >/dev/null
@@ -363,7 +367,7 @@ HOME="$tmp_home" "$repo_root/scripts/install.sh" --remove-hooks --agent claude <
 out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude --no-context-watch </dev/null)"
 echo "$out" | grep -q 'context-watch skipped' || fail "--no-context-watch not reported: $out"
 [ -z "$(cw_commands "$settings")" ] || fail "--no-context-watch registered the hook"
-[ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "--no-context-watch skipped routing"
+[ "$(hook_commands "$settings" | wc -l)" -eq 4 ] || fail "--no-context-watch skipped routing"
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --remove-hooks --agent claude </dev/null >/dev/null
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude --no-hooks </dev/null >/dev/null
 [ -z "$(cw_commands "$settings")" ] || fail "--no-hooks registered context-watch"
@@ -374,7 +378,7 @@ echo '{"version":2,"plugins":{"context-watch@workflow-skills":[{"installPath":"/
 out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent claude </dev/null)"
 echo "$out" | grep -q 'context-watch plugin is installed' || fail "context-watch plugin not detected: $out"
 [ -z "$(cw_commands "$settings")" ] || fail "context-watch duplicated next to its plugin"
-[ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "the context-watch plugin suppressed routing"
+[ "$(hook_commands "$settings" | wc -l)" -eq 4 ] || fail "the context-watch plugin suppressed routing"
 rm -rf "$tmp_home/.claude/plugins"
 
 # codex gets routing only
@@ -400,10 +404,10 @@ for name in workflow-skills-context-watch workflow-skills-routing; do
   rm -rf "$settings" "$XDG_DATA_HOME"
   HOME="$tmp_home" "$odd/scripts/install.sh" --agent claude </dev/null >/dev/null
   HOME="$tmp_home" "$odd/scripts/install.sh" --agent claude </dev/null >/dev/null
-  [ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "routing entries lost under a $name path: $(cat "$settings")"
+  [ "$(hook_commands "$settings" | wc -l)" -eq 4 ] || fail "routing entries lost under a $name path: $(cat "$settings")"
   [ "$(cw_commands "$settings" | wc -l)" -eq 3 ] || fail "context-watch entry lost under a $name path: $(cat "$settings")"
   HOME="$tmp_home" "$odd/scripts/install.sh" --remove-context-watch </dev/null >/dev/null
-  [ "$(hook_commands "$settings" | wc -l)" -eq 3 ] || fail "--remove-context-watch took routing under a $name path"
+  [ "$(hook_commands "$settings" | wc -l)" -eq 4 ] || fail "--remove-context-watch took routing under a $name path"
   rm -rf "$tmp_root/$name"
 done
 
