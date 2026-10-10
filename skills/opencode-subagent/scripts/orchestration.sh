@@ -883,11 +883,13 @@ json_status() {
 # The worker's structured block is parsed into result.json already, so render
 # those fields rather than tailing the raw text: a long CONCERNS list would
 # otherwise push QUESTION out of the tail, and a fallback report is not the
-# block at all but raw provider JSONL.
+# block at all but raw provider JSONL. A researcher's findings are prose above
+# the block and are the deliverable, so its report is always shown whole.
 render_status() {
   json_status "$1" | jq -r --argjson full "${report_full:-0}" '
     def report_view:
-      if $full == 1 then (.report // "(no worker report)")
+      if $full == 1 or ((.agent // "") == "workflow-researcher" and .outcome.worker != "no_report")
+      then (.report // "(no worker report)")
       elif (.attempt.worker_question // null) != null or (.attempt.worker_verification // null) != null
            or (.attempt.worker_concerns // null) != null then
         ([ (if (.attempt.worker_verification // null) != null then "VERIFICATION: " + .attempt.worker_verification else empty end),

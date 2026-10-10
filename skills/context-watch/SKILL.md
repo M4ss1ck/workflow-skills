@@ -5,7 +5,7 @@ description: 'Report how large the current Claude Code session''s context is, ho
 
 # context-watch
 
-Every turn re-reads the whole context, so a long session costs more per turn and recalls less reliably. This skill measures the context on demand. The companion **context-watch hook** warns automatically once the context passes 200k and 400k tokens.
+Every turn re-reads the whole context, so a long session costs more per turn and recalls less reliably. This skill measures the context on demand. The companion **context-watch hook** acts automatically: past 200k tokens it asks the model to finish its step and stop, and past 400k it stops the turn.
 
 ## Procedure
 
@@ -19,11 +19,16 @@ Every turn re-reads the whole context, so a long session costs more per turn and
 
 2. Relay its output to the user in two or three lines: the size, the ratio to the session start, and where it sits against WARN and URGE.
 
-3. If the context is past WARN, name the options and leave the choice with the user: `/compact` (if their setup has it), or saving what matters (memory, repo docs, a handoff note) and starting fresh with `/clear`. The decision belongs to the user, so keep working and let them pick.
+3. If the context is past WARN, name the options and leave the choice with the user: `/compact` (if their setup has it), their handoff routine, or starting fresh with `/clear`.
 
 ## The [context-watch] line
 
-When a turn arrives carrying a `[context-watch]` line, the hook has measured the context past URGE. Keep the current task at full quality and full scope, then mention the size once at the next natural stopping point. Compaction and clearing stay with the user.
+A `[context-watch]` line means the hook measured the context past a threshold. Do what it says:
+
+- **After a tool call (WARN):** finish the step you are on, then stop and tell the user the context size. Do not start another step.
+- **With a user message (URGE):** before doing anything for the message, tell the user the size and ask how to proceed.
+
+Either way, do not write a handoff, and never run `/compact` or `/clear` yourself: what happens next is the user's call. If the user says to continue, continue; the hook does not fire again for the same crossing.
 
 ## The hook
 
@@ -32,12 +37,12 @@ The automatic warning is a separate install, so the skill works without it:
 - **Claude Code plugin:** install `context-watch` from the `workflow-skills` marketplace.
 - **Local install:** `scripts/install.sh --agent claude` registers it in `~/.claude/settings.json` (`--no-context-watch` skips it, `--remove-context-watch` removes it).
 
-Behaviour:
+Behaviour. The hook checks after every tool call (`PostToolUse`, `PostToolUseFailure`) and at every prompt (`UserPromptSubmit`):
 
-- **WARN (default 200k):** a message to the user only. The model never sees it.
-- **URGE (default 400k):** the same message, plus the one `[context-watch]` line to the model. Repeats every further 100k.
-- Each threshold fires once per crossing. Compacting, or any drop more than 10% of WARN below WARN, re-arms both; hovering around a threshold does not re-fire it.
-- Subagent prompts are ignored. Prompts nobody typed (`/loop` ticks, background-agent reports) do count, so a crossing can be announced while you are away; the message stays in the session's history.
+- **WARN (default 200k):** a notice to the user. After a tool call, also the `[context-watch]` line telling the model to finish its step and stop; at a prompt, the notice only.
+- **URGE (default 400k):** after a tool call, the turn stops (`continue: false`) with the hook's message to the user. Seen first at a prompt, the model is told to ask the user before starting (stopping there would discard the prompt).
+- Each threshold fires once per crossing. Compacting, or a drop more than 10% of WARN below a threshold, re-arms it; hovering around a threshold does not re-fire it.
+- Subagent prompts and tool calls are ignored. Prompts nobody typed (`/loop` ticks, background-agent reports) do count. Headless `claude -p` runs stop at URGE too; raise the threshold or disable the hook for unattended automation.
 - Right after a compaction the size is reported as "just compacted": the exact size is known after the next reply.
 
 Settings come from env vars, or from `~/.config/workflow-skills/context-watch.conf` as `KEY=VALUE` lines; env wins:

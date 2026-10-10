@@ -1442,4 +1442,106 @@ run_delegate "$oc" recover --reports-only --json >/dev/null
 [ "$(wc -l <"$recovery_dir/events.jsonl")" -eq "$before_events" ] \
   || fail "opencode: repeated recover duplicated result_recovered"
 
+# --- researcher role: read-only agent, its own model, kept for life ----------
+
+# the researcher model falls back to the worker model, then wins when set
+printf 'OPENCODE_SUBAGENT_MODEL=stub/worker\n' >"$conf_file"
+run_delegate "$oc" policy --json | jq -e '.research_model == "stub/worker"' >/dev/null \
+  || fail "opencode: research model does not fall back to the worker model"
+printf 'OPENCODE_SUBAGENT_MODEL=stub/worker\nOPENCODE_SUBAGENT_RESEARCH_MODEL=stub/research\n' >"$conf_file"
+out="$(run_delegate "$oc" policy)"
+echo "$out" | grep -q '^RESEARCH_MODEL: stub/research$' || fail "opencode: research model not reported: $out"
+rm -f "$stub_dir/opencode.args"
+out="$(STUB_SESSION=ses_research run_delegate "$oc" start --role researcher "survey the parser")"
+rtask="$(task_of "$out")"
+run_delegate "$oc" --wait "$rtask" --poll-timeout 30 >/dev/null
+grep -qE -- '--agent workflow-researcher --model stub/research --title workflow-researcher task_' "$stub_dir/opencode.args" \
+  || fail "opencode: researcher did not launch its agent and model: $(cat "$stub_dir/opencode.args")"
+[ -f "$stub_dir/config/opencode/agent/workflow-researcher.md" ] || fail "opencode: researcher agent not synced"
+grep -q '^  edit: deny$' "$stub_dir/config/opencode/agent/workflow-researcher.md" || fail "opencode: researcher can edit"
+jq -e '.agent == "workflow-researcher" and .model == "stub/research"' "$(taskdir_of "$rtask")/task.json" >/dev/null \
+  || fail "opencode: researcher role not persisted on the Task"
+# a retry keeps the role without --role, and refuses to switch it
+rm -f "$stub_dir/opencode.args"
+run_delegate "$oc" retry "$rtask" --reason "cite sources" "add citations" >/dev/null
+run_delegate "$oc" --wait "$rtask" --poll-timeout 30 >/dev/null
+grep -qE -- '--agent workflow-researcher --model stub/research' "$stub_dir/opencode.args" \
+  || fail "opencode: retry dropped the researcher role: $(cat "$stub_dir/opencode.args")"
+set +e
+msg="$(run_delegate "$oc" retry "$rtask" --role worker --reason "edit now" "change it" 2>&1)"
+code=$?
+bad="$(run_delegate "$oc" start --role editor "x" 2>&1)"
+bad_code=$?
+set -e
+[ "$code" -eq 2 ] && echo "$msg" | grep -q 'runs the researcher role' \
+  || fail "opencode: retry switched roles ($code): $msg"
+[ "$bad_code" -eq 2 ] && echo "$bad" | grep -q 'invalid --role' || fail "opencode: unknown role accepted ($bad_code): $bad"
+# a researcher's findings are the deliverable: status shows its report whole
+out="$(run_delegate "$oc" status "$rtask")"
+echo "$out" | grep -q '^STATUS: DONE' || fail "opencode: researcher status hid the full report: $out"
+run_delegate "$oc" decide "$rtask" accept --reason "researcher fixture" >/dev/null
+# the researcher's shell rules, replayed the way OpenCode 2.x applies them:
+# each command of a compound line on its own, last matching rule wins
+python3 - "$repo_root/skills/opencode-subagent/agents/workflow-researcher.md" <<'PY' || fail "opencode: researcher shell rules admit a write, exec or leak"
+import fnmatch, re, sys
+text = open(sys.argv[1]).read().split("---")[1]
+rules, inside = [], False
+for line in text.splitlines():
+    if line.strip() == "bash:":
+        inside = True
+        continue
+    if inside:
+        m = re.match(r'^    "(.*)": (allow|deny)$', line)
+        if m:
+            rules.append((m.group(1), m.group(2)))
+        elif line.startswith("  ") and not line.startswith("    ") and not line.lstrip().startswith("#"):
+            break
+def allowed(command):
+    for part in re.split(r"\s*(?:;|&&|\|\||\||\n)\s*", command):
+        verdict = "deny"
+        for pattern, action in rules:
+            if fnmatch.fnmatchcase(part.strip(), pattern):
+                verdict = action
+        if verdict != "allow":
+            return False
+    return True
+must_allow = ["git status", "git diff", "git diff origin/main...HEAD", "git log --oneline -5", "git show HEAD:README.md",
+              "git blame -L 1,20 a.py", "git ls-files", "git rev-parse HEAD", "git merge-base HEAD origin/main",
+              "gh pr view 12 --comments", "gh pr diff 12", "gh issue view 7"]
+must_deny = ["touch x", "ls; touch x", "git log | tee x", "echo hi > x", "cat .env", "git diff > x", "ls && touch x",
+             "git difftool -y -x 'touch /tmp/pwn' HEAD~1", "sort -o README.md /dev/null", "uniq a b",
+             "sort -S1 --compress-program=sh a", "find . -fprint x", "rg --pre touch x .", "git grep -O vi x",
+             "git diff --output=x", "git log --output=x", "git diff --ext-diff", "git diff --no-index /etc/passwd /dev/null",
+             "git show HEAD:.env", "echo $OPENAI_API_KEY", "git log $(touch x)", "git log `touch x`", "jq -n env",
+             "grep -rn API_KEY .", "cat ~/.local/share/opencode/auth.json", "git -c core.pager=sh log",
+             "git diff --textconv", "git log < x", "gh pr merge 12", "gh api -X POST repos/x/y/issues",
+             "git status & touch x", "git status &"]
+bad = [c for c in must_allow if not allowed(c)] + [c for c in must_deny if allowed(c)]
+if bad or not rules or rules[0] != ("*", "deny"):
+    print("wrong verdicts:", bad, "rules:", rules[:2])
+    sys.exit(1)
+PY
+# resuming the closed researcher session keeps the researcher, and refuses the worker
+rm -f "$stub_dir/opencode.args"
+out="$(STUB_SESSION=ses_research run_delegate "$oc" resume ses_research "one more source")"
+run_delegate "$oc" --wait "$(task_of "$out")" --poll-timeout 30 >/dev/null
+grep -qE -- '--agent workflow-researcher --model stub/research --session ses_research' "$stub_dir/opencode.args" \
+  || fail "opencode: resume handed a researcher session to another role: $(cat "$stub_dir/opencode.args")"
+run_delegate "$oc" decide "$(task_of "$out")" accept --reason "resume fixture" >/dev/null
+set +e
+msg="$(run_delegate "$oc" start --resume ses_research --role worker "edit it" 2>&1)"
+code=$?
+set -e
+[ "$code" -eq 2 ] && echo "$msg" | grep -q 'ran the researcher role' \
+  || fail "opencode: start --resume switched a session's role ($code): $msg"
+# --save-default with --role researcher sets the researcher model, not the worker's
+stask="$(task_of "$(run_delegate "$oc" start --role researcher --model stub/saved-research --save-default "x")")"
+grep -q '^OPENCODE_SUBAGENT_RESEARCH_MODEL=stub/saved-research$' "$conf_file" \
+  || fail "opencode: --save-default --role researcher did not set the research model: $(cat "$conf_file")"
+grep -q '^OPENCODE_SUBAGENT_MODEL=stub/worker$' "$conf_file" || fail "opencode: researcher --save-default touched the worker model"
+run_delegate "$oc" --wait "$stask" --poll-timeout 30 >/dev/null
+run_delegate "$oc" decide "$stask" accept --reason "save-default fixture" >/dev/null
+
+rm -f "$conf_file"
+
 echo "Subagent script tests passed."

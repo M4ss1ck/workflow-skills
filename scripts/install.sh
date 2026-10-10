@@ -465,7 +465,7 @@ install_context_watch() {
   fi
   result="$(merge_hooks claude install "$python" "$entry" "$cw_marker" "$cw_template" "$cw_shim")"
   echo "hooks    claude: context-watch -> $(hooks_file_for claude) (replaced $result earlier entries)"
-  echo "hooks    claude: context-watch WARNS past 200k tokens and URGES past 400k; tune or disable in ${XDG_CONFIG_HOME:-~/.config}/workflow-skills/context-watch.conf, or re-run with --no-context-watch"
+  echo "hooks    claude: context-watch asks Claude to wrap up past 200k tokens and stops the turn past 400k; tune or disable in ${XDG_CONFIG_HOME:-~/.config}/workflow-skills/context-watch.conf, or re-run with --no-context-watch"
 }
 
 remove_context_watch() {

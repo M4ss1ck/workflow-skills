@@ -6,17 +6,20 @@ Paid, live Claude Code sessions that check what the context-watch hook does to a
 python3 tests/evals/context-watch/run.py --model sonnet --runs 2
 ```
 
-Each run loads `plugins/context-watch` with `--plugin-dir`, which exercises the plugin's `hooks.json` through `CLAUDE_PLUGIN_ROOT` and the symlinked `scripts/`. Thresholds are lowered through the environment, so a fresh session crosses them on its second turn: the first turn has no usage row to measure yet. Each run gets its own scratch directory and XDG state and config.
+Each run loads `plugins/context-watch` with `--plugin-dir`, which exercises the plugin's `hooks.json` through `CLAUDE_PLUGIN_ROOT` and the symlinked `scripts/`, with `--setting-sources project,local` so an installed copy of the plugin in your user settings stays out. Thresholds are lowered through the environment. A fresh session has no usage row at its first prompt, so its first tool call is where the crossing happens, which is the long-autonomous-turn case the tool check exists for. Each run gets its own scratch directory and XDG state and config.
 
 | Scenario | Checks |
 |----------|--------|
-| `warn-is-user-only` | The hook fired WARN. Claude Code rendered it as a `system`/`informational` stream event, which is what a UI shows. The model, asked to quote any `context-watch:` text, finds none. |
-| `urge-reaches-model` | The hook fired URGE, and the model can quote the `[context-watch]` line. |
-| `urge-keeps-working` | With URGE active, a three-file task is finished in full, and the turn ends with DONE rather than a question. |
+| `urge-stops-the-turn` | A three-file task in a fresh session with URGE at 1k: the first tool call stops the turn, so `numbers.txt` exists and `sum.txt` does not, the stream carries the hook's stop message, and the reply never reaches DONE. |
+| `continue-after-stop` | The same, then "Continue the task.": all three files are complete and no second stop appears. |
+| `warn-stops-after-the-step` | WARN at 1k, URGE out of reach: the host renders the WARN notice, the model stops before `sum.txt` and reports the context size, with no hard stop needed. |
+| `urge-at-a-prompt-asks-first` | URGE crossed before a prompt: no file is written, and the reply raises the context size. |
 
-Grading is deterministic: the hook's state file shows what fired, the stream shows what the host rendered, and the reply and files show what reached the model and what it did.
+Grading is deterministic: the hook's state file shows what fired, the stream shows what the host rendered, and the reply and files show where the model stopped.
 
 ## Recorded results
+
+The results below predate the stop behaviour: they graded the earlier design (WARN user-only, URGE informational). The current scenarios have not been run yet.
 
 | File | Runtime | Runs | Result |
 |------|---------|------|--------|

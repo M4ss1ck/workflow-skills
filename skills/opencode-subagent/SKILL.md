@@ -1,12 +1,12 @@
 ---
 name: opencode-subagent
-description: 'Delegate bounded, mechanically verifiable implementation work to a cheap OpenCode worker and verify the result yourself. Use when the user asks to delegate to OpenCode ("delegate this to opencode", "have opencode implement this", "/opencode-subagent"), and — when delegation_policy=auto — when you are about to spend a long read/edit/test loop on work whose design is already settled. Also use before creating or messaging a native subagent (Agent, SendMessage, spawn_agent, followup_task), and whenever an opencode-subagent routing hook denies one. This runs a paid external CLI: respect the configured delegation policy.'
+description: 'Delegate bounded, mechanically verifiable implementation work to a cheap OpenCode worker, and research or review to a cheap read-only OpenCode researcher with web access, then verify the result yourself. Use when the user asks to delegate to OpenCode ("delegate this to opencode", "have opencode implement this", "/opencode-subagent"), and — when delegation_policy=auto — when you are about to spend a long read/edit/test loop on work whose design is already settled. Also use before creating or messaging a native subagent (Agent, SendMessage, spawn_agent, followup_task), and whenever an opencode-subagent routing hook denies one. This runs a paid external CLI: respect the configured delegation policy.'
 argument-hint: 'Required: the task to delegate. Optional: model as provider/model (defaults to the configured worker model).'
 ---
 
 # OpenCode Subagent
 
-You are the **supervisor**. `opencode run` is a **worker**. This skill is the transport and the durable record between you: it launches a constrained OpenCode agent (`workflow-worker`) on a bounded task, tracks every attempt, and keeps a reconstructable history of what was asked, what happened, what you verified, and what you decided.
+You are the **supervisor**. `opencode run` is a **worker**. This skill is the transport and the durable record between you: it launches a constrained OpenCode agent on a bounded task (`workflow-worker` edits code; `workflow-researcher` reads, searches the web and reports), tracks every attempt, and keeps a reconstructable history of what was asked, what happened, what you verified, and what you decided.
 
 The savings come from context isolation (the worker's read/edit/test loop never enters your context) and price arbitrage (the worker runs a cheap model). Both are lost if the task is under-specified.
 
@@ -72,6 +72,19 @@ Poor candidates: architectural design; choosing abstractions; diagnosing an uncl
 
 **Do not delegate merely because a task is easy.** A one-line edit costs more to hand off than to make.
 
+## Research and review: the researcher role
+
+`--role researcher` launches `workflow-researcher` instead of the worker: it reads the tree with OpenCode's read/grep/glob/list tools, runs a short list of read-only `git` and `gh` commands, and uses `websearch` and `webfetch`. It cannot edit files, run any other shell command, read `.env` files through its tools, or delegate. Use it for codebase exploration, web research, and independent reviews of a diff against a spec or the repo's standards.
+
+```bash
+opencode-delegate start --role researcher --cwd /abs/repo 'Review the diff from git diff origin/main...HEAD against AGENTS.md. Report findings ranked by severity with path:line and the failure scenario.'
+opencode-delegate wait TASK
+```
+
+Its findings come first in its report, followed by the usual `STATUS` block; `status` and `wait` print a researcher's report in full. Its model is `OPENCODE_SUBAGENT_RESEARCH_MODEL`, falling back to the worker model. A Task keeps its role for life: `retry` and `resume` reuse it and refuse a different `--role`.
+
+A review is never done by its author. If a review cannot be delegated (policy `off`, routing broken, no researcher model configured, OpenCode missing or failing to launch), tell the user that no independent review ran. Do not review your own work in its place.
+
 ## Delegation policy
 
 `delegate.sh policy` reports the effective setting; `delegate.sh policy <value>` changes it.
@@ -90,33 +103,32 @@ The policy governs **all** delegation, native subagents included, not only OpenC
 
 With the routing hooks installed (Claude Code and Codex CLI only; see `opencode-delegate route doctor`), every native call that creates an agent or gives an existing one more work is denied until a routing decision is recorded for it. Status, wait and cancel calls are never blocked.
 
-When a hook denies a native call:
+When a hook denies a native call, the denial carries a ready-made command and the route it will produce for each work kind under the current policy. Record the decision and follow the printed route:
 
-1. Read the proposal: `opencode-delegate route show PROPOSAL`. It prints the call, the current policy, and this skill's revision.
-2. Classify the work honestly and record it:
+```bash
+opencode-delegate route record --proposal PROPOSAL --skill-revision REVISION \
+  --assignment parser-review --work-kind implementation|research|review \
+  --scope "review the parser diff against the spec"
+```
 
-   ```bash
-   opencode-delegate route record --proposal PROPOSAL \
-     --assignment parser-tests --scope "write tests for the parser" \
-     --work-kind implementation|research|review \
-     --authorization user|workflow|none \
-     --source-excerpt "verbatim words of the user (or workflow file) that authorize delegation" \
-     [--workflow-file PATH] \
-     --requested-provider opencode|native|unspecified \
-     [--native-reason "why the OpenCode implementation worker is unsuitable"] \
-     --scope-status clear|ambiguous|conflicting \
-     --skill-revision REVISION
-   ```
+Every other field defaults to its cautious value. Add only what is true:
 
-3. Follow the printed route exactly:
+| Flag | When |
+|---|---|
+| `--authorization user --source-excerpt "..."` | The user asked for delegation. Quote their words verbatim from a message in this session. |
+| `--authorization workflow --source-excerpt "..."` | A skill the user invoked in this session (for example `/implement`), or a committed `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`/`SKILL.md` named with `--workflow-file`, asks for it. Skills you loaded yourself, and this skill, do not count. |
+| `--requested-provider opencode\|native` | That source names a provider. |
+| `--native-reason needs-host-tools` | Research or review that needs tools only the host has (MCP servers, the browser). |
+| `--native-reason opencode-failed --opencode-task TASK` | Research or review already routed to OpenCode under this `--assignment`, whose researcher Task ran and failed: the worker reported blocked, failed or no report, the Task has a failure class (timeout, crash, provider error), or you rejected it. A cancel or take-over on its own does not count. |
+| `--scope-status ambiguous\|conflicting` | You cannot state the scope cleanly. |
 
 | Route | Do |
 |---|---|
 | `native` | Repeat the native call **once**, before the next user message, from the same worktree. The hook runs the proposal exactly as first submitted, even if you reword it. |
-| `opencode` | Do not repeat the native call. Delegate with `opencode-delegate start` and verify. |
-| `local` | Do not repeat the native call. Do the work yourself. |
-| `none` | Delegation is off. Do the work yourself and tell the user how to change the policy if it matters. |
-| `clarify` | Ask the user to resolve the scope, or work locally. |
+| `opencode` | Do not repeat the native call. Delegate with the printed `opencode-delegate start --role worker\|researcher` command and verify. |
+| `local` | Do not repeat the native call. Do the work yourself. Never returned for a review. |
+| `none` | Delegation is off. Do the work yourself, except a review: say no independent review ran. |
+| `clarify` | Ask the user to resolve the scope, or work locally (not a review). |
 
 The router computes the route; you only supply facts. How it decides:
 
@@ -124,19 +136,22 @@ The router computes the route; you only supply facts. How it decides:
 |---|---|
 | `off` | `none` |
 | scope not `clear` | `clarify` |
-| assignment previously routed to OpenCode | `opencode`, unless a **later** user message explicitly asks for native |
+| assignment previously routed to OpenCode | `opencode`, unless a **later** user message explicitly asks for native, or research/review with `opencode-failed` and a failed Task |
 | `--requested-provider opencode` (user or workflow source) | `opencode` |
-| `--requested-provider native` with a user source | `native` |
-| `explicit`, `--authorization none` | `local`: you choosing to delegate is not authorization |
-| authorized (user/workflow source, or `auto`), implementation | `opencode` |
-| authorized, research or review with `--native-reason` | `native` |
+| `--requested-provider native` with a user source, or a workflow source for research/review | `native` |
+| `explicit`, `--authorization none`, implementation or research | `local`: you choosing to delegate is not authorization |
+| implementation | `opencode` worker |
+| research or review with `--native-reason needs-host-tools` | `native` (an unauthorized review under `explicit`: `clarify`, ask the user; unauthorized research was already `local`) |
+| research or review | `opencode` researcher (a review even when nobody authorized delegation: it needs a reviewer who is not the author) |
+
+Agent types that are read-only by name skip routing entirely: `Explore`, `Plan`, `claude-code-guide`, `*-reviewer`, `*-explorer` by default, and follow-up `SendMessage` calls to such an agent created with a `name` (give read-only agents a `name` if you will message them again: a follow-up addressed by agent id is gated, because the hook never sees the id the host assigns). Change the list with `OPENCODE_SUBAGENT_READONLY_AGENTS` (patterns separated by spaces or commas; an empty value turns the bypass off). It is a name allowlist, not a sandbox: an agent definition in a checkout can call itself `x-reviewer` and still have write tools. Not under policy `off`, and Claude Code only.
 
 Rules:
 
-- `--source-excerpt` must be quoted verbatim from a user message in this session, or from a `--workflow-file` (an `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` or `SKILL.md` committed unmodified in the worktree's git repository). Quoting a mention, a negation ("don't use opencode") or a file the user pasted is misrecording; the router checks the words exist, not what they mean.
-- Keep the same `--assignment` slug for the same piece of work. An explicit OpenCode assignment stays OpenCode: if OpenCode fails, report it and work locally; going native needs a new explicit user instruction.
-- Do not relabel implementation as research to get a native agent.
-- A denial that says the router cannot evaluate the call (broken state, runtime mismatch, no captured user input) means work locally and tell the user what `opencode-delegate route doctor` reports. Never retry in a loop, and never route around the hook through a shell or another CLI.
+- `--source-excerpt` must be quoted verbatim from a user message in this session, a skill the user invoked, or a `--workflow-file`. Quoting a mention, a negation ("don't use opencode") or a file the user pasted is misrecording; the router checks the words exist, not what they mean.
+- Keep the same `--assignment` slug for the same piece of work. An explicit OpenCode assignment stays OpenCode: if OpenCode fails on implementation, report it and work locally; going native needs a new explicit user instruction.
+- Do not relabel implementation as research to get a different route.
+- A denial that says the router cannot evaluate the call (broken state, runtime mismatch, no captured user input) means work locally (a review: report that none ran) and tell the user what `opencode-delegate route doctor` reports. Never retry in a loop, and never route around the hook through a shell or another CLI.
 - A grant belongs to the agent that recorded it: a subagent cannot spend its parent's grant. Parallel native calls each need their own recorded decision.
 - A new user message, a policy change, compaction or resume retires unused grants. Grants expire after 30 minutes.
 
@@ -346,18 +361,20 @@ On Linux, each persisted process identity includes the kernel boot ID and `/proc
 
 Jobs are detached and survive your session. Retention is configurable in `subagents.conf`: terminal Task history is kept for `OPENCODE_SUBAGENT_RETENTION_DAYS` (default 90), while its bulky provider streams (`raw.jsonl`, `provider-progress.json`, `provider-baseline.json`, git snapshots) are dropped after `OPENCODE_SUBAGENT_RAW_RETENTION_DAYS` (default 7). Active and unresolved Tasks are never pruned. Pruning runs on launch and does not inspect or remove sibling Claude/Codex state.
 
-## The worker agent
+## The agents
 
-`agents/workflow-worker.md` is installed into OpenCode's agent directory (by `scripts/install.sh --agent opencode`, and by `delegate.sh` on first launch). It enforces, in OpenCode's own permission system rather than by asking nicely:
+`agents/workflow-worker.md` and `agents/workflow-researcher.md` are installed into OpenCode's agent directory (by `scripts/install.sh --agent opencode`, and by `delegate.sh` before each launch). The worker enforces, in OpenCode's own permission system rather than by asking nicely:
 
 - no recursive delegation (`task: deny`) and no questions to a user who is not there (`question: deny`);
-- no web search or fetch;
+- no web search or fetch (use the researcher for that);
 - no writes outside the working tree;
 - no `git commit`, `push`, `reset --hard`, `clean`, `rebase`, `checkout`, `switch`, `stash`, or branch deletion;
 - normal read/search/edit/LSP/test/build access;
 - temperature 0 and a bounded step count.
 
 It ends its turn with `STATUS` / `FILES_CHANGED` / `VERIFICATION` / `QUESTION` / `CONCERNS`, which the wrapper parses into `outcome.worker` and `worker_question`.
+
+The researcher has the same reporting contract, with its findings written above the block. Its shell runs only `git status/diff/log/show/blame/ls-files/rev-parse/merge-base`, `gh pr view/diff` and `gh issue view`, one plain command at a time. Pipes into anything else, redirection, `$`/backtick substitution, `--output`, `--ext-diff`, `--textconv`, `--no-index`, `difftool` and any argument naming `.env` are denied; files are read with OpenCode's own tools, whose `read` denies `.env` files. General tools such as `cat`, `find`, `rg` or `sort` are left out on purpose: several have flags that write files or run programs, and this agent also has the network. The `.env` blocking covers its tools, not every way a secret can sit in a tree, so do not point it at repositories whose secrets live in tracked files.
 
 ## Configuration
 
@@ -366,12 +383,14 @@ It ends its turn with `STATUS` / `FILES_CHANGED` / `VERIFICATION` / `QUESTION` /
 ```ini
 OPENCODE_SUBAGENT_DELEGATION_POLICY=auto
 OPENCODE_SUBAGENT_MODEL=provider/some-cheap-coding-model
+OPENCODE_SUBAGENT_RESEARCH_MODEL=provider/some-cheap-model
+OPENCODE_SUBAGENT_READONLY_AGENTS=Explore Plan claude-code-guide *-reviewer *-explorer
 OPENCODE_SUBAGENT_STALL_SECONDS=300
 OPENCODE_SUBAGENT_RETENTION_DAYS=90
 OPENCODE_SUBAGENT_RAW_RETENTION_DAYS=7
 ```
 
-`OPENCODE_SUBAGENT_MODEL` is the worker model. Resolution is: `--model` → configured worker model → **error**. The wrapper never falls back to whatever model OpenCode uses globally; inheriting a frontier model would defeat the purpose. Set it once with `--model provider/model --save-default`. With no policy key the policy is `explicit`.
+`OPENCODE_SUBAGENT_MODEL` is the worker model. Resolution is: `--model` → configured worker model → **error**. The wrapper never falls back to whatever model OpenCode uses globally; inheriting a frontier model would defeat the purpose. Set it once with `--model provider/model --save-default`. `OPENCODE_SUBAGENT_RESEARCH_MODEL` is the researcher's model (`--role researcher --model ... --save-default` sets it); unset, the researcher uses the worker model. With no policy key the policy is `explicit`.
 
 ## Constraints
 

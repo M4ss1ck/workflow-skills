@@ -26,6 +26,7 @@ Standard library only; no model or network calls.
 import argparse
 import datetime
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
@@ -43,6 +44,24 @@ WORK_KINDS = ("implementation", "research", "review")
 AUTHORIZATIONS = ("user", "workflow", "none")
 PROVIDERS = ("opencode", "native", "unspecified")
 SCOPE_STATUSES = ("clear", "ambiguous", "conflicting")
+# Why research or review must run natively instead of on the OpenCode
+# researcher. A closed set: free text let every agent justify native work.
+NATIVE_REASONS = ("needs-host-tools", "opencode-failed")
+# Agent types that cannot change anything run without a routing decision.
+READONLY_KEY = "OPENCODE_SUBAGENT_READONLY_AGENTS"
+DEFAULT_READONLY_AGENTS = "Explore Plan claude-code-guide *-reviewer *-explorer"
+# Claude Code injects an invoked skill's body as a meta user row starting so.
+SKILL_BODY_PREFIX = "Base directory for this skill:"
+TRANSCRIPT_SCAN_CAP = 512 * 1024 * 1024
+# Appended to every denial that cannot know the work kind: a review that cannot
+# be delegated must not quietly become the author reviewing their own work.
+REVIEW_NOTE = ("If this was a review, do not review your own work instead: tell the user no independent "
+               "review ran.")
+# opencode-delegate outcomes that show an OpenCode run happened and failed. A
+# cancel or take-over is the supervisor's own act, so on its own it proves
+# nothing: those need a recorded failure class as well.
+RAN_TRANSPORTS = ("finished", "incomplete", "failed", "timeout", "cancelled")
+FAILED_WORKER_OUTCOMES = ("blocked", "no_report", "failed")
 
 GRANT_TTL_SECONDS = 1800
 LOCK_WAIT_SECONDS = 4.0
@@ -126,22 +145,46 @@ def iso(ts):
 
 # ---------------------------------------------------------------- policy
 
-def read_policy(path=None):
-    """Same semantics as delegate.sh resolve_policy: the last `KEY=` line wins,
-    the value is the rest of the line verbatim, empty or absent means explicit,
-    anything else is an error."""
+def conf_value(key, path=None):
+    """Same semantics as delegate.sh conf_get: the last `KEY=` line wins and the
+    value is the rest of the line verbatim. None when the key is absent."""
     path = path or conf_file()
-    value = ""
+    value = None
     if os.path.isfile(path):
         with open(path, "rb") as f:
             for raw in f.read().split(b"\n"):
                 line = raw.decode("utf-8", "surrogateescape")
-                if line.startswith(POLICY_KEY + "="):
-                    value = line[len(POLICY_KEY) + 1:]
-    value = value or DEFAULT_POLICY
+                if line.startswith(key + "="):
+                    value = line[len(key) + 1:]
+    return value
+
+
+def read_policy(path=None):
+    """Same semantics as delegate.sh resolve_policy: empty or absent means
+    explicit, anything else is an error."""
+    path = path or conf_file()
+    value = conf_value(POLICY_KEY, path) or DEFAULT_POLICY
     if value not in POLICIES:
         raise RoutingError(f"invalid {POLICY_KEY} in {path}: {value} (want off|explicit|auto)")
     return value
+
+
+def readonly_agents(path=None):
+    """Patterns naming agent types that skip routing. Absent means the default
+    list; present and empty means none."""
+    value = conf_value(READONLY_KEY, path)
+    if value is None:
+        value = DEFAULT_READONLY_AGENTS
+    return [p for p in re.split(r"[\s,]+", value) if p]
+
+
+def is_readonly_agent(tool, operation, tool_input, patterns):
+    """Only a new agent of a named read-only type: a continuation names an
+    agent instance, whose type the hook cannot see."""
+    if operation != "create" or tool not in ("Agent", "Task"):
+        return False
+    kind = tool_input.get("subagent_type")
+    return isinstance(kind, str) and any(fnmatch.fnmatchcase(kind, p) for p in patterns)
 
 
 # ---------------------------------------------------------------- pure decision
@@ -149,9 +192,14 @@ def read_policy(path=None):
 def decide(policy, record, prior_assignment=None, excerpt_epoch=None):
     """Compute a route from recorded fields. Returns (route, reason).
 
-    route is one of: native, opencode, local, none, clarify, invalid.
+    route is one of: native, opencode, local, none, clarify, invalid. For
+    opencode, role_for() names the OpenCode agent.
     `prior_assignment` is the stored assignment with the same name, if any.
     `excerpt_epoch` is the latest user-input epoch containing the source excerpt.
+
+    A review is never routed local: an author reviewing their own work is not a
+    review. Research and review go to the OpenCode researcher unless a closed
+    reason (or the user) asks for a native agent.
     """
     if policy == "off":
         return "none", "delegation policy is off; the user can enable it with: opencode-delegate policy explicit"
@@ -161,6 +209,7 @@ def decide(policy, record, prior_assignment=None, excerpt_epoch=None):
     authorized_by_source = record["authorization"] in ("user", "workflow")
     requested = record["requested_provider"]
     kind = record["work_kind"]
+    native_reason = record.get("native_reason", "")
 
     if prior_assignment and prior_assignment.get("provider") == "opencode":
         later_user_override = (
@@ -169,26 +218,45 @@ def decide(policy, record, prior_assignment=None, excerpt_epoch=None):
             and excerpt_epoch is not None
             and excerpt_epoch > prior_assignment["epoch"]
         )
-        if not later_user_override:
-            return "opencode", (
-                f"assignment {record['assignment']} is recorded as OpenCode work; a native substitute "
-                "needs a later explicit user instruction for native delegation"
-            )
-        return "native", "later explicit user override of an OpenCode assignment"
+        if later_user_override:
+            return "native", "later explicit user override of an OpenCode assignment"
+        if native_reason == "opencode-failed" and kind != "implementation":
+            return "native", (f"assignment {record['assignment']} ran on OpenCode as "
+                              f"{record.get('opencode_task') or 'a failed Task'} and failed")
+        return "opencode", (
+            f"assignment {record['assignment']} is recorded as OpenCode work; a native substitute "
+            "needs a later explicit user instruction for native delegation"
+        )
+    if native_reason == "opencode-failed":
+        return "invalid", (f"--native-reason opencode-failed needs assignment {record['assignment']} to have been "
+                           "routed to OpenCode first; record the OpenCode attempt under the same --assignment")
 
     if requested == "opencode":
         return "opencode", "explicit OpenCode assignment"
     if requested == "native" and record["authorization"] == "user":
         return "native", "explicit user request for native delegation"
+    if requested == "native" and record["authorization"] == "workflow" and kind != "implementation":
+        return "native", f"workflow instruction asks for native {kind}"
 
-    if not (policy == "auto" or authorized_by_source):
+    if not (policy == "auto" or authorized_by_source) and kind != "review":
         return "local", "policy is explicit and nobody requested delegation; a model choosing to delegate is not authorization"
 
     if kind == "implementation":
         return "opencode", "bounded implementation goes to the OpenCode worker"
-    if not record.get("native_reason", "").strip():
-        return "invalid", f"native {kind} needs --native-reason: why the OpenCode implementation worker is unsuitable"
-    return "native", f"independently scoped {kind}: {record['native_reason'].strip()}"
+    if native_reason == "needs-host-tools":
+        if not (policy == "auto" or authorized_by_source):
+            # An unauthorized review may go to the cheap researcher, but a
+            # native agent is the model granting itself delegation.
+            return "clarify", (f"policy is explicit and nobody authorized delegation; a native {kind} needs the "
+                               "user's go-ahead, so ask them")
+        return "native", f"{kind} needs tools only the host agent has"
+    if kind == "review" and not (policy == "auto" or authorized_by_source):
+        return "opencode", "a review needs an independent reviewer, never the author: it goes to the OpenCode researcher"
+    return "opencode", f"{kind} goes to the OpenCode researcher"
+
+
+def role_for(kind):
+    return "worker" if kind == "implementation" else "researcher"
 
 
 def validate_record(args):
@@ -201,27 +269,43 @@ def validate_record(args):
         elif choices and value not in choices:
             problems.append(f"--{name.replace('_', '-')} must be one of {'|'.join(choices)} (got {value})")
 
+    # The common case needs only what the agent alone knows: the deny message
+    # hands out a one-line command, and every omitted field is the cautious one.
+    authorization = args.authorization or "none"
+    requested_provider = args.requested_provider or "unspecified"
+    scope_status = args.scope_status or "clear"
+    native_reason = (args.native_reason or "").strip()
     need("proposal", args.proposal)
     need("assignment", args.assignment)
     need("scope", args.scope)
     need("work_kind", args.work_kind, WORK_KINDS)
-    need("authorization", args.authorization, AUTHORIZATIONS)
-    need("requested_provider", args.requested_provider, PROVIDERS)
-    need("scope_status", args.scope_status, SCOPE_STATUSES)
+    need("authorization", authorization, AUTHORIZATIONS)
+    need("requested_provider", requested_provider, PROVIDERS)
+    need("scope_status", scope_status, SCOPE_STATUSES)
     need("skill_revision", args.skill_revision)
+    if native_reason and native_reason not in NATIVE_REASONS:
+        problems.append(f"--native-reason must be one of {'|'.join(NATIVE_REASONS)} (got {native_reason}); "
+                        "research and review otherwise go to the OpenCode researcher")
+    opencode_task = (getattr(args, "opencode_task", None) or "").strip()
+    if native_reason == "opencode-failed" and not re.fullmatch(r"task_[0-9]{8}-[0-9]{6}-[0-9]+", opencode_task):
+        problems.append("--native-reason opencode-failed needs --opencode-task TASK: the failed OpenCode Task "
+                        "(opencode-delegate list)")
+    if opencode_task and native_reason != "opencode-failed":
+        problems.append("--opencode-task applies only to --native-reason opencode-failed")
+    if native_reason and args.work_kind == "implementation":
+        problems.append("--native-reason applies to research and review; implementation goes to the OpenCode worker "
+                        "unless the user asks for native")
     if args.assignment and not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", args.assignment):
         problems.append("--assignment must be a lowercase slug ([a-z0-9._-], at most 64 chars)")
     if args.scope and len(args.scope) > 2000:
         problems.append("--scope is limited to 2000 characters")
-    if args.authorization in ("user", "workflow"):
+    if authorization in ("user", "workflow"):
         excerpt = normalize_text(args.source_excerpt or "")
         if len(excerpt) < MIN_EXCERPT_CHARS:
             problems.append(f"--source-excerpt must quote at least {MIN_EXCERPT_CHARS} characters of the authorizing text")
-    if args.authorization == "workflow" and not args.workflow_file:
-        problems.append("--workflow-file is required with --authorization workflow")
-    if args.authorization != "workflow" and args.workflow_file:
+    if authorization != "workflow" and args.workflow_file:
         problems.append("--workflow-file applies only to --authorization workflow")
-    if args.authorization == "none" and args.requested_provider in ("opencode", "native"):
+    if authorization == "none" and requested_provider in ("opencode", "native"):
         problems.append("a requested provider needs its source: use --authorization user or workflow with --source-excerpt")
     if problems:
         raise RoutingError("; ".join(problems))
@@ -230,12 +314,13 @@ def validate_record(args):
         "assignment": args.assignment,
         "scope": args.scope.strip(),
         "work_kind": args.work_kind,
-        "authorization": args.authorization,
+        "authorization": authorization,
         "source_excerpt": args.source_excerpt or "",
         "workflow_file": args.workflow_file or "",
-        "requested_provider": args.requested_provider,
-        "native_reason": (args.native_reason or "").strip(),
-        "scope_status": args.scope_status,
+        "requested_provider": requested_provider,
+        "native_reason": native_reason,
+        "opencode_task": opencode_task,
+        "scope_status": scope_status,
         "skill_revision": args.skill_revision,
     }
 
@@ -416,15 +501,42 @@ def pre_tool_output(decision, reason=None, updated_input=None):
     return {"hookSpecificOutput": out}
 
 
-def denial_text(proposal_id, operation, revision):
+ROUTE_LABELS = {"opencode": "OpenCode", "local": "you, locally", "native": "native", "none": "nobody"}
+
+
+def route_preview(policy, authorization="none"):
+    """What a record with no requested provider and no native reason routes to
+    under this policy, per work kind: the same decide() the record will run, so
+    the preview cannot drift from the decision."""
+    parts = []
+    for kind in WORK_KINDS:
+        record = {"assignment": "preview", "work_kind": kind, "authorization": authorization, "requested_provider": "unspecified",
+                  "native_reason": "", "scope_status": "clear"}
+        route, _ = decide(policy, record)
+        label = f"OpenCode {role_for(kind)}" if route == "opencode" else ROUTE_LABELS.get(route, route)
+        parts.append(f"{kind} -> {label}")
+    return ", ".join(parts)
+
+
+def denial_text(proposal_id, operation, revision, policy):
     what = "create a native agent" if operation == "create" else "give an existing native agent more work"
+    plain, asked = route_preview(policy), route_preview(policy, "user")
+    routes = (f"Under policy {policy} that routes {plain}" if plain == asked else
+              f"Under policy {policy}, if nobody asked for delegation, that routes {plain}; if the user or a skill "
+              f"they invoked asked for it (see below), {asked}")
     return (
-        f"opencode-subagent routing paused this call to {what} (proposal {proposal_id}). "
-        "Native delegation needs a recorded routing decision first. Load the opencode-subagent skill, then run "
-        f"`opencode-delegate route show {proposal_id}` and record the decision with "
-        f"`opencode-delegate route record --proposal {proposal_id} ... --skill-revision {revision}`. "
-        "If the route is native, repeat this call once: the hook runs this proposal exactly as first submitted. "
-        "If the route is opencode or local, do not repeat this call."
+        f"opencode-subagent routing paused this call to {what} (proposal {proposal_id}). Record a decision in one "
+        f"command, then follow the route it prints: `opencode-delegate route record --proposal {proposal_id} "
+        f"--skill-revision {revision} --assignment SLUG --work-kind KIND --scope 'SCOPE'`, where KIND is "
+        f"implementation, research or review and SCOPE says what the agent would do. {routes} (an assignment "
+        "already routed to OpenCode stays there). "
+        "Add --native-reason needs-host-tools only if the work needs tools only you have (MCP servers, the browser). "
+        "If the user, or a skill they invoked, asked for delegation or named a provider, add --authorization user "
+        "(or workflow, for a skill) --source-excerpt 'THEIR EXACT WORDS', and --requested-provider opencode or native "
+        "if they named one. "
+        "Route native: repeat this call once; the hook runs it exactly as first submitted. Any other route: do not "
+        "repeat it. Never review your own work instead: if no reviewer can run, say no independent review ran. "
+        "Details: the opencode-subagent skill."
     )
 
 
@@ -529,22 +641,43 @@ def pre_tool_use(payload, host, session, store):
 
     if policy == "off":
         output = pre_tool_output("deny", "Native delegation is disabled: the delegation policy is off. "
-                                 "Do the work yourself; only the user can change it (opencode-delegate policy explicit).")
+                                 "Do the work yourself; only the user can change it (opencode-delegate policy explicit). "
+                                 + REVIEW_NOTE)
         store.audit(event="deny", session=key, tool=tool, reason="policy_off")
         return remember(output, None)
+
+    # Read-only agent types run untouched: no proposal, no grant, nothing to
+    # replay. This comes before grant matching, or an open grant for another
+    # Agent call would be spent replaying that call in place of this one.
+    # Follow-up messages to a named read-only agent pass too: routing them
+    # elsewhere would throw away the context it built.
+    readonly = session.setdefault("readonly_agents", [])
+    name = tool_input.get("name") if isinstance(tool_input.get("name"), str) else ""
+    if operation == "create" and name in readonly and not is_readonly_agent(tool, operation, tool_input, readonly_agents()):
+        readonly.remove(name)  # the name now belongs to an agent that can write
+    if host == "claude" and (
+            is_readonly_agent(tool, operation, tool_input, readonly_agents())
+            or (operation == "continue" and tool == "SendMessage" and target in readonly)):
+        if operation == "create" and name and name not in readonly:
+            readonly.append(name)
+            del readonly[:-MAX_PROPOSALS]
+        store.audit(event="allow_readonly", session=key, tool=tool,
+                    subagent_type=tool_input.get("subagent_type"), target=target)
+        store.save_session(session)
+        return None
 
     if capture_failed(store.root, session):
         retired = retire_grants(session, "user input capture failed")
         output = pre_tool_output("deny", "opencode-subagent routing failed to capture the latest user message, so no "
                                  "delegation decision can be trusted. Work locally, or ask the user to send their "
-                                 "request again; run opencode-delegate route doctor if this repeats.")
+                                 "request again; run opencode-delegate route doctor if this repeats. " + REVIEW_NOTE)
         store.audit(event="deny", session=key, tool=tool, reason="capture_failed", retired_grants=retired)
         return remember(output, None)
 
     if session["epoch"] == 0:
         output = pre_tool_output("deny", "opencode-subagent routing has no captured user input for this session "
                                  "(hooks became active mid-session). Work locally, or ask the user to restate the "
-                                 "delegation request in a new message so a decision can be recorded.")
+                                 "delegation request in a new message so a decision can be recorded. " + REVIEW_NOTE)
         store.audit(event="deny", session=key, tool=tool, reason="no_epoch")
         return remember(output, None)
 
@@ -588,8 +721,9 @@ def pre_tool_use(payload, host, session, store):
         "cwd": cwd, "agent": agent, "epoch": session["epoch"], "operation": operation, "tool_name": tool, "target": target,
         "tool_input": tool_input, "digest": input_digest(tool_input), "tool_use_id": tool_use_id,
         "runtime": runtime, "runtime_path": self_path(),
+        "transcript_path": payload.get("transcript_path") if isinstance(payload.get("transcript_path"), str) else "",
     }
-    output = pre_tool_output("deny", denial_text(proposal_id, operation, skill_revision()))
+    output = pre_tool_output("deny", denial_text(proposal_id, operation, skill_revision(), policy))
     store.audit(event="deny", session=key, proposal=proposal_id, tool=tool, reason="needs_decision")
     return remember(output, proposal_id)
 
@@ -624,7 +758,7 @@ def failure_output(payload, message):
         return None
     return pre_tool_output("deny", f"opencode-subagent routing could not evaluate this delegation call: {message}. "
                            "Native delegation stays blocked until this is fixed (opencode-delegate route doctor); "
-                           "work locally meanwhile.")
+                           "work locally meanwhile. " + REVIEW_NOTE)
 
 
 # ---------------------------------------------------------------- record
@@ -669,6 +803,109 @@ def check_workflow_file(path, cwd):
         raise RoutingError(f"--workflow-file {path} has uncommitted changes")
 
 
+def loaded_skill_with(proposal, excerpt):
+    """The base directory of a skill the user invoked in this session whose body
+    contains the excerpt, or None.
+
+    Claude Code injects an invoked skill's body as a meta user row, which
+    UserPromptSubmit never sees. Only a skill the user typed counts: a skill the
+    model loaded through the Skill tool carries a sourceToolUseID, and quoting
+    it would be the model authorizing itself. The same goes for this skill's
+    own body, which the denial tells the model to load, and for a skill inside
+    the delegation repository that is not committed unmodified (the model can
+    write that one). Tool results are user rows too, but never meta text rows.
+    """
+    path = proposal.get("transcript_path") or ""
+    if proposal.get("host") != "claude" or not path or not os.path.isfile(path):
+        return None
+    wanted = normalize_text(excerpt)
+    read = 0
+    with open(path, "rb") as f:
+        for line in f:
+            read += len(line)
+            if read > TRANSCRIPT_SCAN_CAP:
+                raise RoutingError(f"the session transcript is larger than {TRANSCRIPT_SCAN_CAP >> 20} MB, so invoked "
+                                   "skills cannot be checked; quote a committed instruction file with --workflow-file")
+            if b"isMeta" not in line or SKILL_BODY_PREFIX.encode() not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if (not isinstance(row, dict) or row.get("type") != "user" or row.get("isMeta") is not True
+                    or row.get("sourceToolUseID") or row.get("isSidechain")):
+                continue
+            content = (row.get("message") or {}).get("content")
+            texts = [content] if isinstance(content, str) else [
+                b.get("text", "") for b in content or [] if isinstance(b, dict) and b.get("type") == "text"]
+            for text in texts:
+                if not (isinstance(text, str) and text.startswith(SKILL_BODY_PREFIX) and wanted in normalize_text(text)):
+                    continue
+                skill = os.path.realpath(text[len(SKILL_BODY_PREFIX):].split("\n", 1)[0].strip())
+                if os.path.basename(skill) == "opencode-subagent" or not trusted_skill(skill, proposal["cwd"]):
+                    continue
+                return skill
+    return None
+
+
+def trusted_skill(skill, cwd):
+    """A skill outside the delegation repository is the user's install; one
+    inside it must be committed unmodified, like any workflow file."""
+    try:
+        top = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if top.returncode != 0:
+        return True
+    root = os.path.realpath(top.stdout.strip())
+    if os.path.commonpath([root, skill]) != root:
+        return True
+    try:
+        check_workflow_file(os.path.join(skill, "SKILL.md"), cwd)
+    except RoutingError:
+        return False
+    return True
+
+
+def subagents_state_dir():
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(base, "workflow-skills", "subagents")
+
+
+def check_failed_task(task_id, cwd, since):
+    """--native-reason opencode-failed must point at an OpenCode Task that ran
+    in this worktree after the assignment was routed to OpenCode, and failed."""
+    path = os.path.join(subagents_state_dir(), task_id, "task.json")
+    try:
+        with open(path) as f:
+            task = json.load(f)
+    except (OSError, ValueError):
+        raise RoutingError(f"--opencode-task {task_id} is not an OpenCode Task (no readable {path})")
+    if not isinstance(task, dict):
+        raise RoutingError(f"--opencode-task {task_id}: unreadable task.json")
+    if not task.get("cwd") or os.path.realpath(task["cwd"]) != cwd:
+        raise RoutingError(f"--opencode-task {task_id} ran in {task.get('cwd')}, not in this worktree")
+    created = task.get("created_at") or ""
+    try:
+        created_ts = datetime.datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()
+    except ValueError:
+        raise RoutingError(f"--opencode-task {task_id} has no creation time")
+    if created_ts + 1 < since:
+        raise RoutingError(f"--opencode-task {task_id} predates this assignment's OpenCode routing")
+    if task.get("agent") != "workflow-researcher":
+        raise RoutingError(f"--opencode-task {task_id} is not a researcher Task; research and review run on the "
+                           "OpenCode researcher (start --role researcher)")
+    outcome = task.get("outcome") or {}
+    if outcome.get("transport") not in RAN_TRANSPORTS:
+        raise RoutingError(f"--opencode-task {task_id} never ran (transport {outcome.get('transport')})")
+    state = task.get("state")
+    failed = (outcome.get("worker") in FAILED_WORKER_OUTCOMES or bool(task.get("failure_class"))
+              or state == "rejected")
+    if not failed:
+        raise RoutingError(f"--opencode-task {task_id} did not fail (state {state}, worker {outcome.get('worker')}, "
+                           "no failure class); verify and decide it first")
+
+
 def record_decision(args, store=None):
     store = store or Store()
     record = validate_record(args)
@@ -702,6 +939,13 @@ def record_decision(args, store=None):
                 raise RoutingError("--source-excerpt does not appear in any captured user message of this session; "
                                    "quote the user's words verbatim")
             source = {"kind": "user", "epoch": epoch_of_excerpt}
+        elif record["authorization"] == "workflow" and not record["workflow_file"]:
+            skill = loaded_skill_with(proposal, record["source_excerpt"])
+            if skill is None:
+                raise RoutingError("--source-excerpt does not appear in any skill the user invoked in this session "
+                                   "(Claude Code only; skills you loaded yourself do not count); quote the skill's "
+                                   "words verbatim, or name a committed instruction file with --workflow-file")
+            source = {"kind": "skill", "skill": skill, "transcript": proposal["transcript_path"]}
         elif record["authorization"] == "workflow":
             path = os.path.realpath(os.path.join(proposal["cwd"], record["workflow_file"]))
             check_workflow_file(path, proposal["cwd"])
@@ -715,6 +959,13 @@ def record_decision(args, store=None):
             source = {"kind": "workflow", "path": path, "sha256": file_digest(path, 64)}
 
         prior = session["assignments"].get(record["assignment"])
+        failed_task = None
+        if record["native_reason"] == "opencode-failed" and prior and prior.get("provider") == "opencode":
+            failed_task = record["opencode_task"]
+            if failed_task in session.setdefault("spent_failed_tasks", []):
+                raise RoutingError(f"--opencode-task {failed_task} already justified a native route; one failed "
+                                   "Task unlocks one assignment once")
+            check_failed_task(failed_task, proposal["cwd"], prior["time"])
         route, reason = decide(policy, record, prior, epoch_of_excerpt)
         stored = {k: v for k, v in record.items() if k != "proposal"}
         stored["source_excerpt"] = record["source_excerpt"][:500]
@@ -725,6 +976,9 @@ def record_decision(args, store=None):
 
         proposal["decision"] = {"time": now(), "route": route, "reason": reason, "policy": policy,
                                 "record": stored, "source": source}
+        if route == "native" and failed_task:
+            session["spent_failed_tasks"].append(failed_task)
+            del session["spent_failed_tasks"][:-MAX_PROPOSALS]
         if route == "native":
             proposal["status"] = "granted"
             proposal["grant"] = {"epoch": session["epoch"], "policy": policy, "runtime": runtime,
@@ -737,18 +991,34 @@ def record_decision(args, store=None):
             session["assignments"][record["assignment"]] = {
                 "provider": route, "epoch": proposal["epoch"], "proposal": proposal["id"], "time": now()}
         store.save_session(session)
-        return {"proposal": proposal["id"], "route": route, "reason": reason, "next": next_step(route, proposal)}
+        result = {"proposal": proposal["id"], "route": route, "reason": reason,
+                  "next": next_step(route, record["work_kind"], proposal["cwd"])}
+        if route == "opencode":
+            result["role"] = role_for(record["work_kind"])
+        return result
 
 
-def next_step(route, proposal):
+def next_step(route, kind, cwd):
+    role = role_for(kind)
+    review = kind == "review"
     return {
         "native": f"Repeat the native call once within {GRANT_TTL_SECONDS // 60} minutes, from the same worktree and "
                   "before the next user message. The hook runs the proposal exactly as first submitted.",
-        "opencode": "Do not repeat the native call. Delegate through opencode-delegate start/run and verify the result.",
+        "opencode": "Do not repeat the native call. Delegate it to the OpenCode " + role + ", then wait and check the "
+                    f"report: opencode-delegate start --role {role} --cwd {shlex_quote(cwd)} 'TASK SPEC'" +
+                    (". If the launch itself fails (no model configured, OpenCode missing), tell the user no "
+                     "independent review ran; do not review your own work." if review else ""),
         "local": "Do not repeat the native call. Do the work yourself.",
-        "none": "Do not repeat the native call. Do the work yourself; delegation is off.",
-        "clarify": "Do not repeat the native call. Ask the user to resolve the scope, or work locally.",
+        "none": ("Do not repeat the native call. Delegation is off, so no independent review can run: do not review "
+                 "your own work, and tell the user no review ran.") if review else
+                "Do not repeat the native call. Do the work yourself; delegation is off.",
+        "clarify": "Do not repeat the native call. Ask the user to resolve the scope" +
+                   (" before the review runs." if review else ", or work locally."),
     }[route]
+
+
+def shlex_quote(text):
+    return text if re.fullmatch(r"[A-Za-z0-9_./=:@,+-]+", text) else "'" + text.replace("'", "'\\''") + "'"
 
 
 # ---------------------------------------------------------------- show / doctor
@@ -789,12 +1059,14 @@ def show(proposal_id, store=None):
         "--assignment": "slug naming this piece of work (reuse it for the same work later)",
         "--scope": "what the assigned work is",
         "--work-kind": "|".join(WORK_KINDS),
-        "--authorization": "user (quote the user) | workflow (quote a workflow file) | none",
+        "--authorization": "none (default) | user (quote the user) | workflow (quote a skill loaded in this session, "
+                           "or a committed instruction file with --workflow-file)",
         "--source-excerpt": f"verbatim quote, at least {MIN_EXCERPT_CHARS} characters",
-        "--workflow-file": "path, with --authorization workflow",
-        "--requested-provider": "|".join(PROVIDERS),
-        "--native-reason": "why the OpenCode worker is unsuitable (native research/review)",
-        "--scope-status": "|".join(SCOPE_STATUSES),
+        "--workflow-file": "committed AGENTS.md/CLAUDE.md/GEMINI.md/SKILL.md, with --authorization workflow",
+        "--requested-provider": "|".join(PROVIDERS) + " (default unspecified)",
+        "--native-reason": "|".join(NATIVE_REASONS) + " (research/review only; otherwise they go to the OpenCode researcher)",
+        "--opencode-task": "the failed OpenCode Task, with --native-reason opencode-failed",
+        "--scope-status": "|".join(SCOPE_STATUSES) + " (default clear)",
         "--skill-revision": result["skill_revision"],
     }
     return result
@@ -923,7 +1195,7 @@ def main(argv):
     hook.add_argument("--host", choices=("auto", "claude", "codex"), default="auto")
     rec = sub.add_parser("record")
     for name in ("proposal", "assignment", "scope", "work-kind", "authorization", "source-excerpt",
-                 "workflow-file", "requested-provider", "native-reason", "scope-status", "skill-revision"):
+                 "workflow-file", "requested-provider", "native-reason", "opencode-task", "scope-status", "skill-revision"):
         rec.add_argument(f"--{name}")
     rec.add_argument("--json", action="store_true")
     sh = sub.add_parser("show")
@@ -938,7 +1210,8 @@ def main(argv):
         try:
             output = run_hook(args.host, sys.stdin.read())
         except Exception:  # noqa: BLE001 - e.g. undecodable stdin; never exit non-zero from a hook
-            output = pre_tool_output("deny", "opencode-subagent routing could not read the hook input; native delegation stays blocked")
+            output = pre_tool_output("deny", "opencode-subagent routing could not read the hook input; native "
+                                     "delegation stays blocked. " + REVIEW_NOTE)
         if output is not None:
             print(json.dumps(output))
         return 0
