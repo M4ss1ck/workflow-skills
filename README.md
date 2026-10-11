@@ -74,7 +74,7 @@ scripts/install.sh --remove-context-watch          # remove only the context-wat
 
 ## Native delegation routing
 
-`opencode-subagent` ships hooks that make the supervisor go through the delegation policy before it starts or messages a **native** subagent. Without a recorded routing decision, the native call is denied and becomes a proposal. The supervisor records the facts (`opencode-delegate route record`), the router computes the route from them and the policy (`native`, `opencode`, `local`, `none`, `clarify`), and only a `native` route lets the next matching call through, once. That call runs the proposal exactly as first submitted. The procedure is in [the skill](skills/opencode-subagent/SKILL.md#native-delegation-routing).
+`opencode-subagent` ships hooks that make the supervisor go through the delegation policy before it starts or messages a **native** subagent. Without a recorded routing decision, the native call is denied and becomes a proposal. The supervisor records the facts (`opencode-delegate route record`), the router computes the route from them and the policy (`native`, `opencode`, `local`, `none`, `clarify`), and only a `native` route lets the next matching call through, once. That call runs the proposal exactly as first submitted. The procedure is in [the routing reference](skills/opencode-subagent/references/routing.md).
 
 | Host | Status | Intercepted calls |
 |------|--------|-------------------|

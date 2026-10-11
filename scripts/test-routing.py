@@ -685,6 +685,21 @@ class Recording(Env):
         with self.assertRaisesRegex(routing.RoutingError, "not the current opencode-subagent skill revision"):
             self.record(self.pid, skill_revision="000000000000")
 
+    def test_skill_revision_covers_the_routing_reference(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as skill:
+            os.makedirs(os.path.join(skill, "references"))
+            def write(rel, text):
+                with open(os.path.join(skill, rel), "w") as f:
+                    f.write(text)
+            write("SKILL.md", "skill\n")
+            write(os.path.join("references", "routing.md"), "rules v1\n")
+            with mock.patch.object(routing, "skill_dir", return_value=skill):
+                before = routing.skill_revision()
+                write(os.path.join("references", "routing.md"), "rules v2\n")
+                self.assertNotEqual(before, routing.skill_revision())
+                self.assertRegex(routing.skill_revision(), r"^[0-9a-f]{12}$")
+
     def test_invalid_route_keeps_proposal_pending(self):
         with self.assertRaisesRegex(routing.RoutingError, "routed to OpenCode first"):
             self.record(self.pid, work_kind="research", native_reason="opencode-failed",
