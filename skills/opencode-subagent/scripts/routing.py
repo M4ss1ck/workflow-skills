@@ -151,7 +151,13 @@ def runtime_identity():
 
 
 def skill_revision():
-    return file_digest(os.path.join(skill_dir(), "SKILL.md"), 12)
+    """Digest of the instructions a routing decision is recorded against:
+    SKILL.md plus the routing reference it points to."""
+    h = hashlib.sha256()
+    for rel in ("SKILL.md", os.path.join("references", "routing.md")):
+        with open(os.path.join(skill_dir(), rel), "rb") as f:
+            h.update(hashlib.sha256(f.read()).digest())
+    return h.hexdigest()[:12]
 
 
 def now():
