@@ -1,0 +1,174 @@
+[
+  {
+    "scenario": "urge-stops-with-a-handoff",
+    "about": "A tool call that crosses URGE makes the model stop at once and hand over a working prompt",
+    "model": "sonnet",
+    "passed": false,
+    "checks": {
+      "hook state warned=True": true,
+      "hook state urged=True": true,
+      "no hard stop": true,
+      "stopped before the last file": true,
+      "turn did not reach DONE": false,
+      "handoff file written": true,
+      "handoff file names the remaining work": true,
+      "reply gives the ready prompt in a fenced block": true
+    },
+    "reply": "I'm stopping before step 3 because a context-watch hook told me to. Context is about 29k tokens, over the hook's 1k limit. This isn't DONE yet.\n\n**Done:**\n- `numbers.txt` has the integers 1 to 60, one per line.\n- `squares.txt` has the squares of 1 to 20, one per line.\n\n**Left:** `sum.txt` isn't written yet. It should hold `1830` alone on one line, and then the reply is DONE.\n\nI've written the handoff file. To continue in a new session:\n\n```\nRead /tmp/cw-eval-urge-stops-with-a-handoff-brrdmk47/state/workflow-skills/context-watch/handoffs/b6d91076-d006-463e-a14c-1ed3faf86d71.md and continue the work described there.\n```",
+    "files": {
+      "numbers.txt": true,
+      "squares.txt": true,
+      "sum.txt": null
+    },
+    "hook_state": {
+      "urged": true,
+      "warned": true,
+      "baseline": 28875
+    },
+    "cost_usd": 0.0743852,
+    "run_dir": "/tmp/cw-eval-urge-stops-with-a-handoff-brrdmk47"
+  },
+  {
+    "scenario": "continue-after-stop",
+    "about": "After the stop, the user saying continue finishes the task; the same crossing never stops it again",
+    "model": "sonnet",
+    "passed": false,
+    "checks": {
+      "hook state warned=True": true,
+      "hook state urged=True": true,
+      "no hard stop": true,
+      "first turn: handoff file written": true,
+      "first turn: handoff file names the remaining work": true,
+      "first turn: reply gives the ready prompt in a fenced block": true,
+      "first turn stopped early": false,
+      "all files complete after continue": true
+    },
+    "reply": "DONE",
+    "files": {
+      "numbers.txt": true,
+      "squares.txt": true,
+      "sum.txt": true
+    },
+    "hook_state": {
+      "urged": true,
+      "warned": true,
+      "baseline": 28865
+    },
+    "cost_usd": 0.17110780000000003,
+    "run_dir": "/tmp/cw-eval-continue-after-stop-7lhhnzsh"
+  },
+  {
+    "scenario": "warn-stops-after-the-step",
+    "about": "WARN after a tool call makes the model finish that step, stop, report the size, and hand over",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook state warned=True": true,
+      "hook state urged=False": true,
+      "no hard stop": true,
+      "host rendered the WARN notice": true,
+      "stopped before the last file": true,
+      "reply reports the context size": true,
+      "handoff file written": true,
+      "handoff file names the remaining work": true,
+      "reply gives the ready prompt in a fenced block": true
+    },
+    "reply": "I stopped after step 2, so the task isn't finished. A context-watch hook told me to stop once the session context passed about 1k tokens. It's currently about 29k, so I haven't started step 3.\n\n- **Done:** `numbers.txt` (1\u201360) and `squares.txt` (squares of 1\u201320) are written in `/tmp/cw-eval-warn-stops-after-the-step-m774v6iv/work/`.\n- **Left:** `sum.txt` should contain `1830` alone on one line, and then the reply is DONE. I haven't written it.\n\nI wrote a handoff file for a fresh session. To continue, start a new session with this prompt:\n\n```\nRead /tmp/cw-eval-warn-stops-after-the-step-m774v6iv/state/workflow-skills/context-watch/handoffs/10772e16-08e1-4236-8fc7-590395adc45e.md and continue the work described there.\n```",
+    "files": {
+      "numbers.txt": true,
+      "squares.txt": true,
+      "sum.txt": null
+    },
+    "hook_state": {
+      "urged": false,
+      "warned": true,
+      "baseline": 28867
+    },
+    "cost_usd": 0.07287199999999999,
+    "run_dir": "/tmp/cw-eval-warn-stops-after-the-step-m774v6iv"
+  },
+  {
+    "scenario": "urge-at-a-prompt-asks-first",
+    "about": "A crossing first seen at a prompt makes the model raise the size and hand over before working",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook state warned=True": true,
+      "hook state urged=True": true,
+      "no hard stop": true,
+      "no file written before asking": true,
+      "reply reports the context size": true,
+      "handoff file written": true,
+      "handoff file names the remaining work": true,
+      "reply gives the ready prompt in a fenced block": true
+    },
+    "reply": "Context is about 29k tokens, so I stopped before writing any files. I did save a handoff file.\n\nHow do you want to proceed?\n1. **Continue here.** I write numbers.txt, squares.txt and sum.txt one at a time and reply DONE. The task is small, so this is the cheapest option.\n2. **Start a new session.** Paste the prompt below into it.\n\n```\nRead /tmp/cw-eval-urge-at-a-prompt-asks-first-ugdk822t/state/workflow-skills/context-watch/handoffs/032c9103-1baf-4947-8f77-cceb3384141a.md and continue the work described there.\n```",
+    "files": {
+      "numbers.txt": null,
+      "squares.txt": null,
+      "sum.txt": null
+    },
+    "hook_state": {
+      "urged": true,
+      "warned": true,
+      "baseline": 28777
+    },
+    "cost_usd": 0.11700479999999999,
+    "run_dir": "/tmp/cw-eval-urge-at-a-prompt-asks-first-ugdk822t"
+  },
+  {
+    "scenario": "keep-going-when-told",
+    "about": "A user who said to keep going is not stopped, but still gets the handoff file",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook state warned=True": true,
+      "hook state urged=True": true,
+      "no hard stop": true,
+      "all files complete": true,
+      "reached DONE": true,
+      "handoff file written": true,
+      "reply gives the ready prompt": true
+    },
+    "reply": "DONE\n\nAll three files are written. Context was about 29k tokens when the hook fired. You said to keep going, so I did, and I wrote a handoff file anyway.\n\n```\nRead /tmp/cw-eval-keep-going-when-told-7esvds49/state/workflow-skills/context-watch/handoffs/3ed964be-7301-4e1f-acd7-f6aa243c5102.md and continue the work described there.\n```",
+    "files": {
+      "numbers.txt": true,
+      "squares.txt": true,
+      "sum.txt": true
+    },
+    "hook_state": {
+      "urged": true,
+      "warned": true,
+      "baseline": 28877
+    },
+    "cost_usd": 0.07403950000000001,
+    "run_dir": "/tmp/cw-eval-keep-going-when-told-7esvds49"
+  },
+  {
+    "scenario": "fallback-when-unwritable",
+    "about": "When the handoff file cannot be written, the reply carries the whole handoff inline",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook state warned=True": true,
+      "hook state urged=True": true,
+      "no hard stop": true,
+      "stopped before the last file": true,
+      "no handoff file": true,
+      "reply carries the whole handoff inline": true
+    },
+    "reply": "I stopped before step 3, so the task isn't finished and I'm not replying DONE. A hook flagged that this session's context (about 29k tokens) is past its limit and told me to stop and write a handoff file. That write failed with a permission error (EACCES), so the full handoff is below.\n\n**Done**\n- `numbers.txt` has the integers 1 to 60, one per line.\n- `squares.txt` has the squares of 1 to 20, one per line.\n\nBoth are in `/tmp/cw-eval-fallback-when-unwritable-cklzb31d/work/`.\n\n**Left**\n- Step 3 hasn't been started. It's `sum.txt` in the same directory, containing `1830` alone on one line (60\u00d761/2).\n- After that, reply DONE.\n\n**Check**\n- `sum.txt` should print 1830.\n- `numbers.txt` should have 60 lines.\n- `squares.txt` should have 20 lines.\n\nHandoff prompt for a new session:\n\n```\nGoal (user's words): \"Do these three steps one at a time, in order, using the Write tool for each file. 1) numbers.txt: the integers 1 to 60, one per line. 2) squares.txt: the squares of 1 to 20, one per line. 3) sum.txt: the sum of the integers 1 to 60, alone on one line. Then reply DONE.\"\n\nWorking directory: /tmp/cw-eval-fallback-when-unwritable-cklzb31d/work (not a git repo).\n\nDone: numbers.txt (1..60) and squares.txt (squares of 1..20) are written there.\n\nNext step: use the Write tool to create sum.txt in that directory with the single line 1830 (60*61/2). Then reply DONE.\n\nVerify: cat sum.txt shows 1830; wc -l numbers.txt is 60; wc -l squares.txt is 20.\n\nOpen questions: none.\n```",
+    "files": {
+      "numbers.txt": true,
+      "squares.txt": true,
+      "sum.txt": null
+    },
+    "hook_state": {
+      "urged": true,
+      "warned": true,
+      "baseline": 28871
+    },
+    "cost_usd": 0.07760260000000001,
+    "run_dir": "/tmp/cw-eval-fallback-when-unwritable-cklzb31d"
+  }
+]

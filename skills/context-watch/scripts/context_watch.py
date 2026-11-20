@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """context-watch: tell the user when a Claude Code session's context gets large.
 
-  context_watch.py hook      PostToolUse(Failure) / UserPromptSubmit handler: JSON payload on stdin, hook JSON on stdout
+  context_watch.py hook      PostToolUse(Failure) / UserPromptSubmit / PreToolUse(Write) handler: JSON payload on stdin, hook JSON on stdout
   context_watch.py status    print the current session's context size, ratio and thresholds
 
 Context size is the newest real assistant usage row in the transcript:
@@ -13,14 +13,22 @@ it crosses a threshold, not at the next user message:
 
   WARN  the user gets a notice; the model is told to finish the step it is on,
         stop, and tell the user the size.
-  URGE  the turn is stopped ({"continue": false}) with a message for the user.
-        The user decides what happens next: compact, hand off, or continue.
+  URGE  the same, but the model stops at the next safe point, even mid-step.
+
+Every line also asks for a handoff prompt: the model writes a handoff file to a
+path this hook picks and ends its message with a prompt that points at it, or
+carries the whole handoff when the file cannot be written. Only the model knows
+what the work is, so the hook never writes the handoff itself, and it never
+hard-stops the turn ({"continue": false}): that would end the turn before the
+model could write anything, and some sessions (/goal, /loop, a user who said to
+keep going) should not stop at all. The handoff file lives outside the project,
+where Claude Code would ask before every write, so PreToolUse approves a Write
+to exactly this session's handoff path and nothing else.
 
 Each threshold fires once per crossing and re-arms only after the context drops
-well below it (a compaction). A crossing first seen at a user prompt cannot stop
-anything without discarding that prompt, so there the model is told to raise it
-first instead. Any failure is silent: the shim around this file always exits 0,
-because exit 2 from UserPromptSubmit blocks the user's prompt.
+well below it (a compaction). A crossing first seen at a user prompt is handled
+in the reply to that prompt. Any failure is silent: the shim around this file
+always exits 0, because exit 2 from UserPromptSubmit blocks the user's prompt.
 """
 import argparse
 import fcntl
@@ -35,6 +43,7 @@ DEFAULT_WARN = 200_000
 DEFAULT_URGE = 400_000
 TOOL_EVENTS = ("PostToolUse", "PostToolUseFailure")
 EVENTS = TOOL_EVENTS + ("UserPromptSubmit",)
+WRITE_EVENT = "PreToolUse"
 TAIL_START = 256 * 1024          # first backward read; doubles until it finds a row
 SCAN_CAP = 16 * 1024 * 1024      # never read more than this from either end
 STATE_TTL_DAYS = 30
@@ -218,7 +227,8 @@ class SessionState:
 
 def _prune(directory):
     cutoff = time.time() - STATE_TTL_DAYS * 86400
-    for path in glob.glob(os.path.join(directory, "*.json*")):
+    for path in (glob.glob(os.path.join(directory, "*.json*"))
+                 + glob.glob(os.path.join(directory, "handoffs", "*.md"))):
         try:
             if os.path.getmtime(path) < cutoff:
                 os.remove(path)
@@ -278,35 +288,86 @@ def user_message(size, mark, baseline):
             f"costlier, and recall slips.")
 
 
-def stop_message(size, mark, baseline):
-    return (f"context-watch stopped this turn: the context is {describe(size, baseline)}, past {_k(mark)}. "
-            "What next is your call: compact, hand off to a fresh session, or tell Claude to continue.")
+def handoff_path(session_id):
+    """Where the model writes this session's handoff file: one per session, the latest stop wins."""
+    return os.path.join(_state_dir(), "handoffs", _safe_id(session_id) + ".md")
 
 
-def warn_agent_message(size, mark):
-    return (f"[context-watch] This session's context passed {_k(mark)} (now ~{_k(size)} tokens). Finish the "
-            "step you are on, then stop and tell the user the context size so they can decide what to do "
-            "next. Do not start another step. Do not write a handoff, and never run /compact or /clear "
-            "yourself.")
+def handoff_instructions(path):
+    """The handoff-prompt contract every [context-watch] line carries."""
+    return (f"Once you stop, write a handoff file to {path} (overwrite it) for a new session that has none of "
+            "this history: the user's goal in their words; what is done; what is in progress and the exact "
+            "next step; decisions made and why; branch, files touched, and commands that check the work; open "
+            "questions. Point to paths instead of pasting their contents. Then end your message with this "
+            f"handoff prompt in a fenced block: Read {path} and continue the work described there. If the file "
+            "cannot be written, put the whole handoff in the fenced block instead, so it works pasted as-is.")
 
 
-def urge_prompt_message(size, mark):
-    return (f"[context-watch] This session's context is ~{_k(size)} tokens, past {_k(mark)}. Before doing "
-            "anything for this message, tell the user the context size and ask how they want to proceed. "
-            "Do not start the work until they answer. Do not write a handoff, and never run /compact or "
-            "/clear yourself.")
+KEEP_GOING = ("If the user told you to keep going regardless of context size, or this is a /goal or /loop run, "
+              "do not stop: write the handoff file now, give the same fenced handoff prompt, then carry on.")
+
+
+def agent_message(level, event, size, mark, path):
+    """The [context-watch] line for the model: what to do now, then the handoff prompt."""
+    head = f"[context-watch] This session's context is ~{_k(size)} tokens, past {_k(mark)}. "
+    if event == "UserPromptSubmit" and level == "urge":
+        now = ("Before doing anything for this message, tell the user the context size and ask how they want "
+               "to proceed. Do not start the work until they answer. ")
+    elif event == "UserPromptSubmit":
+        now = "Handle this message as usual, then tell the user the context size. "
+    elif level == "urge":
+        now = ("Stop now, at the next point where stopping leaves nothing broken, even in the middle of a "
+               "step: tell the user the context size and what is left undone. ")
+    else:
+        now = ("Finish the step you are on, then stop and tell the user the context size. Do not start "
+               "another step. ")
+    return head + now + handoff_instructions(path) + " " + KEEP_GOING
 
 
 # ---------------------------------------------------------------- commands
 
+def _same_file(requested, expected):
+    """True only for the exact handoff path: same spelling once normalized, same file once resolved.
+
+    Comparing the resolved paths too rejects a ".." that climbs out through a
+    symlink (normpath alone would collapse it), and the file itself must not be
+    a symlink. A symlinked state directory (dotfiles) still matches, because
+    both sides resolve through it.
+    """
+    if not isinstance(requested, str) or not os.path.isabs(requested):
+        return False
+    return (os.path.normpath(requested) == os.path.normpath(expected)
+            and os.path.realpath(requested) == os.path.realpath(expected)
+            and not os.path.islink(expected))
+
+
+def approve_handoff_write(payload):
+    """PreToolUse: allow a main-session Write to this session's own handoff file; stay silent otherwise.
+
+    Silence leaves every other write to the user's normal permission rules.
+    """
+    if payload.get("tool_name") != "Write" or payload.get("agent_id") or not payload.get("session_id"):
+        return None
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict) or not _same_file(tool_input.get("file_path"),
+                                                          handoff_path(payload["session_id"])):
+        return None
+    return {"hookSpecificOutput": {"hookEventName": WRITE_EVENT, "permissionDecision": "allow",
+                                   "permissionDecisionReason": "context-watch: this session's handoff file"}}
+
+
 def run_hook(payload, cfg):
     """The hook decision for one payload: a dict to print, or None for silence."""
     event = payload.get("hook_event_name")
-    if cfg["disabled"] or event not in EVENTS:
+    if cfg["disabled"]:
+        return None
+    if event == WRITE_EVENT:
+        return approve_handoff_write(payload)
+    if event not in EVENTS:
         return None
     # Subagent tool calls and prompts carry the parent's session id: measuring
     # them would spend the main session's one-time warning on an agent with no
-    # user, and stopping one would stop the subagent, not the session.
+    # user, and the subagent, not the session, would be told to stop.
     if payload.get("agent_id"):
         return None
     path, session_id = payload.get("transcript_path"), payload.get("session_id")
@@ -326,17 +387,14 @@ def run_hook(payload, cfg):
     if level is None:
         return None
     mark = cfg["urge"] if level == "urge" else cfg["warn"]
-    if event in TOOL_EVENTS:
-        if level == "urge":
-            return {"continue": False, "stopReason": stop_message(size, mark, baseline)}
-        return {"systemMessage": user_message(size, mark, baseline),
-                "hookSpecificOutput": {"hookEventName": event,
-                                       "additionalContext": warn_agent_message(size, mark)}}
-    out = {"systemMessage": user_message(size, mark, baseline)}
-    if level == "urge":
-        out["hookSpecificOutput"] = {"hookEventName": "UserPromptSubmit",
-                                     "additionalContext": urge_prompt_message(size, mark)}
-    return out
+    handoff = handoff_path(session_id)
+    try:
+        os.makedirs(os.path.dirname(handoff), mode=0o700, exist_ok=True)   # handoffs can hold plans and secrets
+    except OSError:
+        pass                                 # the model falls back to an inline handoff
+    return {"systemMessage": user_message(size, mark, baseline),
+            "hookSpecificOutput": {"hookEventName": event,
+                                   "additionalContext": agent_message(level, event, size, mark, handoff)}}
 
 
 def find_transcript(session_id):
@@ -348,8 +406,10 @@ def find_transcript(session_id):
 
 def run_status(args, cfg):
     path = args.transcript
+    session_id = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if path and not args.session_id:
+        session_id = os.path.splitext(os.path.basename(path))[0]
     if not path:
-        session_id = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID")
         if not session_id:
             print("context-watch: no session: pass --transcript PATH or --session-id ID "
                   "(Claude Code sets CLAUDE_CODE_SESSION_ID for its tools)", file=sys.stderr)
@@ -372,9 +432,10 @@ def run_status(args, cfg):
     else:
         zone = f"{_k(cfg['warn'] - size)} below WARN"
     print(f"context: {describe(size, baseline_size(path))}\n"
-          f"thresholds: WARN {_k(cfg['warn'])} (finish the step and report), URGE {_k(cfg['urge'])} (stop the turn)"
+          f"thresholds: WARN {_k(cfg['warn'])} (finish the step and stop), URGE {_k(cfg['urge'])} (stop now)"
           f"{' [disabled]' if cfg['disabled'] else ''}\n"
           f"status: {zone}\n"
+          f"handoff file: {handoff_path(session_id)}\n"
           f"transcript: {path}")
     return 0
 

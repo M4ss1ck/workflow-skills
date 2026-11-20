@@ -1,0 +1,118 @@
+[
+  {
+    "scenario": "urge-stops-with-a-handoff",
+    "about": "A tool call that crosses URGE makes the model stop at once and hand over a working prompt",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook state warned=True": true,
+      "hook state urged=True": true,
+      "no hard stop": true,
+      "stopped before the last file": true,
+      "turn did not reach DONE": true,
+      "handoff file written": true,
+      "handoff file names the remaining work": true,
+      "reply gives the ready prompt in a fenced block": true
+    },
+    "reply": "I stopped before finishing: steps 1 and 2 are done, and step 3 (`sum.txt`) isn't written yet. A context-watch hook flagged the session at about 29k tokens, over its 1k threshold, and told me to stop and hand off.\n\n- **Done:** `numbers.txt` (1 to 60) and `squares.txt` (squares of 1 to 20), both in `/tmp/cw-eval-urge-stops-with-a-handoff-xtpl60f4/work/`.\n- **Left:** write `sum.txt` in the same folder with `1830` alone on one line, then reply DONE. I haven't run any checks on the two finished files.\n\nThe handoff file is at `/tmp/cw-eval-urge-stops-with-a-handoff-xtpl60f4/state/workflow-skills/context-watch/handoffs/951e77d5-83f8-414f-af47-f212f9a28112.md`. To continue in a new session, paste this:\n\n```\nRead /tmp/cw-eval-urge-stops-with-a-handoff-xtpl60f4/state/workflow-skills/context-watch/handoffs/951e77d5-83f8-414f-af47-f212f9a28112.md and continue the work described there.\n```",
+    "files": {
+      "numbers.txt": true,
+      "squares.txt": true,
+      "sum.txt": null
+    },
+    "hook_state": {
+      "urged": true,
+      "warned": true,
+      "baseline": 28876
+    },
+    "cost_usd": 0.07727790000000001,
+    "run_dir": "/tmp/cw-eval-urge-stops-with-a-handoff-xtpl60f4"
+  },
+  {
+    "scenario": "urge-stops-with-a-handoff",
+    "about": "A tool call that crosses URGE makes the model stop at once and hand over a working prompt",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook state warned=True": true,
+      "hook state urged=True": true,
+      "no hard stop": true,
+      "stopped before the last file": true,
+      "turn did not reach DONE": true,
+      "handoff file written": true,
+      "handoff file names the remaining work": true,
+      "reply gives the ready prompt in a fenced block": true
+    },
+    "reply": "I stopped before finishing, so the task isn't done and I'm not replying DONE yet. The context-watch hook told me to stop once the context passed its limit. The context is about 29k tokens, and the hook's limit is 1k.\n\n- **Done:** `numbers.txt` (1 to 60) and `squares.txt` (squares of 1 to 20), both in `/tmp/cw-eval-urge-stops-with-a-handoff-tk03ns7d/work/`.\n- **Left:** `sum.txt`, which should contain `1830` on one line. After that, reply DONE.\n\nI wrote the handoff to `/tmp/cw-eval-urge-stops-with-a-handoff-tk03ns7d/state/workflow-skills/context-watch/handoffs/a6b646d5-815f-45a7-8e2e-adce2793a69f.md`.\n\n```\nRead /tmp/cw-eval-urge-stops-with-a-handoff-tk03ns7d/state/workflow-skills/context-watch/handoffs/a6b646d5-815f-45a7-8e2e-adce2793a69f.md and continue the work described there.\n```",
+    "files": {
+      "numbers.txt": true,
+      "squares.txt": true,
+      "sum.txt": null
+    },
+    "hook_state": {
+      "urged": true,
+      "warned": true,
+      "baseline": 28879
+    },
+    "cost_usd": 0.07764169999999998,
+    "run_dir": "/tmp/cw-eval-urge-stops-with-a-handoff-tk03ns7d"
+  },
+  {
+    "scenario": "continue-after-stop",
+    "about": "After the stop, the user saying continue finishes the task; the same crossing never stops it again",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook state warned=True": true,
+      "hook state urged=True": true,
+      "no hard stop": true,
+      "first turn: handoff file written": true,
+      "first turn: handoff file names the remaining work": true,
+      "first turn: reply gives the ready prompt in a fenced block": true,
+      "first turn stopped early": true,
+      "all files complete after continue": true
+    },
+    "reply": "DONE",
+    "files": {
+      "numbers.txt": true,
+      "squares.txt": true,
+      "sum.txt": true
+    },
+    "hook_state": {
+      "urged": true,
+      "warned": true,
+      "baseline": 28863
+    },
+    "cost_usd": 0.16674830000000002,
+    "run_dir": "/tmp/cw-eval-continue-after-stop-cp0fy0ec"
+  },
+  {
+    "scenario": "continue-after-stop",
+    "about": "After the stop, the user saying continue finishes the task; the same crossing never stops it again",
+    "model": "sonnet",
+    "passed": true,
+    "checks": {
+      "hook state warned=True": true,
+      "hook state urged=True": true,
+      "no hard stop": true,
+      "first turn: handoff file written": true,
+      "first turn: handoff file names the remaining work": true,
+      "first turn: reply gives the ready prompt in a fenced block": true,
+      "first turn stopped early": true,
+      "all files complete after continue": true
+    },
+    "reply": "DONE",
+    "files": {
+      "numbers.txt": true,
+      "squares.txt": true,
+      "sum.txt": true
+    },
+    "hook_state": {
+      "urged": true,
+      "warned": true,
+      "baseline": 28860
+    },
+    "cost_usd": 0.1659127,
+    "run_dir": "/tmp/cw-eval-continue-after-stop-5stlffaq"
+  }
+]

@@ -1,5 +1,5 @@
 {
-  "description": "context-watch: warn, then stop the turn, when the session's context passes the configured token thresholds.",
+  "description": "context-watch: when the session's context passes the configured token thresholds, the model stops and hands you a prompt for a new session.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -25,6 +25,18 @@
     ],
     "PostToolUseFailure": [
       {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/context-watch-shim.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/context_watch.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write",
         "hooks": [
           {
             "type": "command",

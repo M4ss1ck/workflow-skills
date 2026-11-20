@@ -1,6 +1,6 @@
 {
   "name": "context-watch",
-  "description": "Past 200k tokens of context, asks Claude to finish its step and stop; past 400k, stops the turn so you decide: compact, hand off, or continue.",
+  "description": "Past 200k tokens of context, Claude finishes its step and stops; past 400k, it stops at once. Either way it hands you a prompt to continue in a new session.",
   "author": {
     "name": "massick",
     "email": "4ndyraul@gmail.com"
