@@ -722,6 +722,34 @@ wait "$contender" || fail "opencode: lock race contender failed"
 [ "$c_msg" = acquired ] || fail "opencode: contender never acquired the lock after the live holder released"
 [ ! -e "$fd/.lock" ] && [ ! -e "$fd/.lock.reap" ] || fail "opencode: lock race left lock state behind"
 
+# mkdir is not a mutex. uutils mkdir (Ubuntu 26.04's coreutils) exits 0 when
+# it races another mkdir of the same path, which let two retries hold the Task
+# lock at once in CI. Shim mkdir to always succeed: a contender must still see
+# the live holder's lock as busy. FIFOs hold the holder in place, no timing.
+mkfifo "$race/held" "$race/release"
+STUB_DIR="$stub_dir" bash -c '
+  set -euo pipefail
+  state_root="'"$stub_dir"'/state/workflow-skills/subagents"; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  lock_acquire "'"$fd"'"
+  echo held >"'"$race"'/held"
+  read -r _ <"'"$race"'/release"
+  lock_release
+' &
+mkdir_holder=$!
+read -r _ <"$race/held"
+mkdir_contender="$(STUB_DIR="$stub_dir" bash -c '
+  set -euo pipefail
+  state_root="'"$stub_dir"'/state/workflow-skills/subagents"; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  mkdir() { command mkdir -p "$@"; }
+  if lock_try_acquire "'"$fd"'"; then echo acquired; lock_release; else echo busy; fi
+')"
+echo go >"$race/release"
+wait "$mkdir_holder" || fail "opencode: mkdir-shim lock holder failed"
+[ "$mkdir_contender" = busy ] || fail "opencode: a racing mkdir that reports success broke the Task lock ($mkdir_contender)"
+[ ! -e "$fd/.lock" ] || fail "opencode: mkdir-shim race left lock state behind"
+
 # Concurrent event writers preserve valid JSONL and a gap-free unique sequence.
 for i in {1..12}; do
   STUB_DIR="$stub_dir" bash -c '
