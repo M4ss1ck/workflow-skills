@@ -1061,7 +1061,7 @@ preflight() {
   local policy
   policy="$(resolve_policy)"
   [ "$policy" != "off" ] \
-    || die "delegation is disabled ($policy_key=off in $conf_file); enable it with: delegate.sh policy explicit"
+    || die "OpenCode is disabled ($policy_key=off in $conf_file); native subagents are unaffected. Enable OpenCode with: delegate.sh policy explicit"
   resolve_model
   ensure_agent
   mkdir -p "$state_root"

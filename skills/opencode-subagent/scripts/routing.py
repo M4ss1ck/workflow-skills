@@ -217,17 +217,20 @@ def is_readonly_agent(tool, operation, tool_input, patterns):
 def decide(policy, record, prior_assignment=None, excerpt_epoch=None):
     """Compute a route from recorded fields. Returns (route, reason).
 
-    route is one of: native, opencode, local, none, clarify, invalid. For
+    route is one of: native, opencode, local, clarify, invalid. For
     opencode, role_for() names the OpenCode agent.
     `prior_assignment` is the stored assignment with the same name, if any.
     `excerpt_epoch` is the latest user-input epoch containing the source excerpt.
+
+    Policy off disables OpenCode only, never a native subagent, so it decides
+    before anything else: no OpenCode worker or researcher is ever routed.
 
     A review is never routed local: an author reviewing their own work is not a
     review. Research and review go to the OpenCode researcher unless a closed
     reason (or the user) asks for a native agent.
     """
     if policy == "off":
-        return "none", "delegation policy is off; the user can enable it with: opencode-delegate policy explicit"
+        return "native", "delegation policy is off: OpenCode is disabled, native subagents run ungated"
     if record["scope_status"] != "clear":
         return "clarify", f"scope is {record['scope_status']}; ask the user to resolve it or work locally"
 
@@ -540,7 +543,7 @@ def pre_tool_output(decision, reason=None, updated_input=None):
     return {"hookSpecificOutput": out}
 
 
-ROUTE_LABELS = {"opencode": "OpenCode", "local": "you, locally", "native": "native", "none": "nobody"}
+ROUTE_LABELS = {"opencode": "OpenCode", "local": "you, locally", "native": "native"}
 
 
 def route_preview(policy, authorization="none"):
@@ -660,6 +663,14 @@ def pre_tool_use(payload, host, session, store):
         return seen["output"]
 
     policy = read_policy()
+    if policy == "off":
+        # Off disables OpenCode only: native subagents run ungated (ADR 0001).
+        # No decision rather than an allow, so the host's own permission rules
+        # still apply: they are where a user disables native subagents. It comes
+        # before the target and cwd checks so a call they would reject passes too.
+        store.audit(event="allow", session=key, tool=tool, reason="policy_off")
+        return None
+
     operation, target_field = WORK_TOOLS[tool]
     target = None
     if operation == "continue":
@@ -680,13 +691,6 @@ def pre_tool_use(payload, host, session, store):
         prune_session(session)
         store.save_session(session)
         return output
-
-    if policy == "off":
-        output = pre_tool_output("deny", "Native delegation is disabled: the delegation policy is off. "
-                                 "Do the work yourself; only the user can change it (opencode-delegate policy explicit). "
-                                 + REVIEW_NOTE)
-        store.audit(event="deny", session=key, tool=tool, reason="policy_off")
-        return remember(output, None)
 
     # Read-only agent types run untouched: no proposal, no grant, nothing to
     # replay. This comes before grant matching, or an open grant for another
@@ -1131,9 +1135,6 @@ def next_step(route, kind, cwd):
                     (". If the launch itself fails (no model configured, OpenCode missing), tell the user no "
                      "independent review ran; do not review your own work." if review else ""),
         "local": "Do not repeat the native call. Do the work yourself.",
-        "none": ("Do not repeat the native call. Delegation is off, so no independent review can run: do not review "
-                 "your own work, and tell the user no review ran.") if review else
-                "Do not repeat the native call. Do the work yourself; delegation is off.",
         "clarify": "Do not repeat the native call. Ask the user to resolve the scope" +
                    (" before the review runs." if review else ", or work locally."),
     }[route]

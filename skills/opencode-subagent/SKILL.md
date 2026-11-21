@@ -48,11 +48,11 @@ Required: known scope and decided architecture. Strongly preferred: success chec
 
 ## Delegation policy
 
-`opencode-delegate policy` reports it; `opencode-delegate policy <value>` changes it. It governs **all** delegation, native subagents included.
+`opencode-delegate policy` reports it; `opencode-delegate policy <value>` changes it. It governs OpenCode delegation and the native routing gate. `off` disables OpenCode and stops gating native calls.
 
 | Policy | Meaning |
 |---|---|
-| `off` | Never delegate. The wrapper refuses to launch. |
+| `off` | OpenCode is disabled: the wrapper refuses to launch. Native subagents run ungated. |
 | `explicit` | Delegate only when the user or a calling workflow asks; their request is sufficient authorization. **Default.** |
 | `auto` | You may delegate eligible mechanical work unasked; say in one line what and why. |
 
@@ -69,7 +69,7 @@ opencode-delegate wait TASK
 
 Findings come first in its report, then the `STATUS` block. Its model is `OPENCODE_SUBAGENT_RESEARCH_MODEL`, else the worker model. A Task keeps its role for life.
 
-A review is never done by its author. If no review can be delegated (policy `off`, routing broken, no model, OpenCode failing), tell the user that no independent review ran.
+A review is never done by its author. Under policy `off` the independent reviewer is a native subagent. If no review can be delegated (routing broken, no model, OpenCode failing), tell the user that no independent review ran.
 
 ## Lifecycle
 
@@ -78,7 +78,7 @@ delegate → wait → interpret the worker outcome → verify independently
    → accept  OR  correct and retry  OR  take over
 ```
 
-1. **Check the policy** for delegation the user did not request. Under `explicit` or `off`, do the work yourself.
+1. **Check the policy** for delegation the user did not request. Under `explicit`, do the work yourself; under `off`, OpenCode is out and native subagents are allowed.
 
 2. **Write the job packet.** Task-specific facts only; the worker's standing rules live in its agent definition.
 
