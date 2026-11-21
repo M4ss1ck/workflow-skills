@@ -248,29 +248,52 @@ class Hook(Tmp):
         return self.payload(path, **dict({"hook_event_name": "PostToolUse", "tool_name": "Bash",
                                           "tool_input": {"command": "ls"}, "tool_use_id": "t1"}, **extra))
 
+    def ctx(self, out, event):
+        """The model line of a firing hook output, after checking the shape every firing shares."""
+        self.assertEqual(set(out), {"systemMessage", "hookSpecificOutput"})  # never a hard stop
+        self.assertEqual(out["hookSpecificOutput"]["hookEventName"], event)
+        return out["hookSpecificOutput"]["additionalContext"]
+
+    def assert_handoff(self, line, session="sess-1"):
+        """The handoff-prompt contract: hook-picked path, ready prompt, sections, inline fallback, keep-going."""
+        path = cw.handoff_path(session)
+        self.assertEqual(path, os.path.join(os.environ["XDG_STATE_HOME"], "workflow-skills", "context-watch",
+                                            "handoffs", session + ".md"))
+        self.assertTrue(os.path.isdir(os.path.dirname(path)))  # created, so the model's write lands
+        self.assertEqual(os.stat(os.path.dirname(path)).st_mode & 0o777, 0o700)  # handoffs can hold secrets
+        for phrase in ("[context-watch]", f"Once you stop, write a handoff file to {path}",
+                       "end your message with this handoff prompt in a fenced block",
+                       f"Read {path} and continue the work described there.", "the exact next step",
+                       "decisions made and why", "If the file cannot be written, put the whole handoff in the "
+                       "fenced block instead", "/goal or /loop run", "do not stop: write the handoff file now",
+                       "give the same fenced handoff prompt, then carry on"):
+            self.assertIn(phrase, line)
+        # headless runs stop like interactive ones; automation opts out with CONTEXT_WATCH_DISABLE
+        for gone in ("Do not write a handoff", "/compact", "/clear", "headless"):
+            self.assertNotIn(gone, line)
+
     def test_warn_after_a_tool_call_tells_the_user_and_asks_the_model_to_stop(self):
         path = self.transcript([usage_row(40_000), usage_row(215_000)])
         out = cw.run_hook(self.tool(path), CFG)
-        self.assertEqual(set(out), {"systemMessage", "hookSpecificOutput"})
         self.assertTrue(out["systemMessage"].startswith("context-watch: ~215k tokens (5.4x session start), past 200k."),
                         out["systemMessage"])
-        ctx = out["hookSpecificOutput"]
-        self.assertEqual(ctx["hookEventName"], "PostToolUse")
-        for phrase in ("[context-watch]", "Finish the step you are on, then stop", "Do not start another step",
-                       "Do not write a handoff", "never run /compact or /clear"):
-            self.assertIn(phrase, ctx["additionalContext"])
-        self.assertNotIn("continue", out)
+        line = self.ctx(out, "PostToolUse")
+        self.assertIn("Finish the step you are on, then stop", line)
+        self.assertIn("Do not start another step", line)
+        self.assert_handoff(line)
         self.assertIsNone(cw.run_hook(self.tool(path), CFG))
 
-    def test_urge_after_a_tool_call_stops_the_turn(self):
+    def test_urge_after_a_tool_call_asks_for_a_stop_now_without_hard_stopping(self):
+        # A hard stop would end the turn before the model could write the handoff.
         path = self.transcript([usage_row(40_000), usage_row(412_000)])
         out = cw.run_hook(self.tool(path), CFG)
-        self.assertEqual(set(out), {"continue", "stopReason"})
-        self.assertIs(out["continue"], False)
-        self.assertTrue(out["stopReason"].startswith(
-            "context-watch stopped this turn: the context is ~412k tokens (10.3x session start), past 400k."),
-            out["stopReason"])
-        self.assertLess(len(out["stopReason"].split()), 40)
+        self.assertTrue(out["systemMessage"].startswith(
+            "context-watch: ~412k tokens (10.3x session start), past 400k."), out["systemMessage"])
+        line = self.ctx(out, "PostToolUse")
+        self.assertIn("Stop now", line)
+        self.assertIn("even in the middle of a step", line)
+        self.assertIn("what is left undone", line)
+        self.assert_handoff(line)
         # once per crossing: continuing after the stop is not stopped again
         self.assertIsNone(cw.run_hook(self.tool(path), CFG))
         grown = self.transcript([usage_row(40_000), usage_row(650_000)], name="grown.jsonl")
@@ -278,40 +301,62 @@ class Hook(Tmp):
 
     def test_compaction_rearms_the_stop(self):
         path = self.transcript([usage_row(40_000), usage_row(412_000)])
-        self.assertIs(cw.run_hook(self.tool(path), CFG)["continue"], False)
+        self.assertIn("Stop now", self.ctx(cw.run_hook(self.tool(path), CFG), "PostToolUse"))
         small = self.transcript([usage_row(40_000), usage_row(412_000), boundary_row(30_000)], name="c.jsonl")
         self.assertIsNone(cw.run_hook(self.tool(small), CFG))
-        self.assertIn("hookSpecificOutput", cw.run_hook(self.tool(self.transcript(
-            [usage_row(40_000), usage_row(230_000)], name="w.jsonl")), CFG))
-        self.assertIs(cw.run_hook(self.tool(path), CFG)["continue"], False)
+        self.assertIn("Finish the step", self.ctx(cw.run_hook(self.tool(self.transcript(
+            [usage_row(40_000), usage_row(230_000)], name="w.jsonl")), CFG), "PostToolUse"))
+        self.assertIn("Stop now", self.ctx(cw.run_hook(self.tool(path), CFG), "PostToolUse"))
 
-    def test_warn_at_a_prompt_goes_to_the_user_only(self):
+    def test_warn_at_a_prompt_answers_then_hands_off(self):
         path = self.transcript([usage_row(40_000), usage_row(215_000)])
         out = cw.run_hook(self.payload(path), CFG)
-        self.assertEqual(set(out), {"systemMessage"})
         self.assertLess(len(out["systemMessage"].split()), 35)
+        line = self.ctx(out, "UserPromptSubmit")
+        self.assertIn("Handle this message as usual, then tell the user the context size", line)
+        self.assert_handoff(line)
         self.assertIsNone(cw.run_hook(self.payload(path), CFG))
 
     def test_urge_at_a_prompt_asks_the_model_to_raise_it_first(self):
-        # Stopping here would discard the user's message, so the model is told instead.
         path = self.transcript([usage_row(40_000), usage_row(412_000)])
         out = cw.run_hook(self.payload(path), CFG)
-        self.assertNotIn("continue", out)
         self.assertIn("past 400k", out["systemMessage"])
-        ctx = out["hookSpecificOutput"]
-        self.assertEqual(ctx["hookEventName"], "UserPromptSubmit")
-        self.assertIn("ask how they want to proceed", ctx["additionalContext"])
-        self.assertIn("Do not start the work until they answer", ctx["additionalContext"])
-        # the prompt spent the crossing: a tool call in the same turn does not stop it
+        line = self.ctx(out, "UserPromptSubmit")
+        self.assertIn("ask how they want to proceed", line)
+        self.assertIn("Do not start the work until they answer", line)
+        self.assert_handoff(line)
+        # the prompt spent the crossing: a tool call in the same turn is not told again
         self.assertIsNone(cw.run_hook(self.tool(path), CFG))
 
     def test_a_failed_tool_call_also_counts(self):
         path = self.transcript([usage_row(412_000)])
         out = cw.run_hook(self.tool(path, hook_event_name="PostToolUseFailure", error="exit 1"), CFG)
-        self.assertIs(out["continue"], False)
+        self.assertIn("Stop now", self.ctx(out, "PostToolUseFailure"))
         warn = self.transcript([usage_row(215_000)], name="w.jsonl")
         out = cw.run_hook(self.tool(warn, hook_event_name="PostToolUseFailure", session_id="s2"), CFG)
-        self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "PostToolUseFailure")
+        self.assert_handoff(self.ctx(out, "PostToolUseFailure"), session="s2")
+
+    def test_handoff_path_is_per_session_and_safe(self):
+        self.assertNotEqual(cw.handoff_path("a"), cw.handoff_path("b"))
+        self.assertEqual(os.path.basename(cw.handoff_path("b/../../x")), "b_.._.._x.md")
+        self.assertEqual(os.path.dirname(cw.handoff_path("b/../../x")), os.path.join(cw._state_dir(), "handoffs"))
+
+    def test_unwritable_handoff_dir_still_sends_the_line(self):
+        # The model gets the path and the inline fallback either way; the hook never fails over it.
+        os.makedirs(cw._state_dir())
+        with open(os.path.join(cw._state_dir(), "handoffs"), "w") as f:
+            f.write("a file where the directory should be")
+        out = cw.run_hook(self.tool(self.transcript([usage_row(215_000)])), CFG)
+        self.assertIn("If the file cannot be written", self.ctx(out, "PostToolUse"))
+
+    def test_old_handoff_files_are_pruned(self):
+        old = cw.handoff_path("old")
+        os.makedirs(os.path.dirname(old))
+        with open(old, "w") as f:
+            f.write("# handoff")
+        os.utime(old, (time.time() - 40 * 86400,) * 2)
+        cw.run_hook(self.payload(self.transcript([usage_row(210_000)])), CFG)
+        self.assertFalse(os.path.exists(old))
 
     def test_one_crossing_fires_once_across_both_events(self):
         path = self.transcript([usage_row(215_000)])
@@ -324,7 +369,7 @@ class Hook(Tmp):
                         self.tool(path, agent_id="a1", agent_type="general-purpose")):
             self.assertIsNone(cw.run_hook(payload, CFG))
         self.assertFalse(os.path.exists(cw._state_dir()))
-        self.assertIs(cw.run_hook(self.tool(path), CFG)["continue"], False)
+        self.assertIn("Stop now", cw.run_hook(self.tool(path), CFG)["hookSpecificOutput"]["additionalContext"])
 
     def test_quiet_tool_calls_do_not_rewrite_state(self):
         path = self.transcript([usage_row(50_000)])
@@ -380,6 +425,67 @@ class Hook(Tmp):
         self.assertFalse(os.path.exists(stale))
 
 
+class HandoffWrite(Tmp):
+    """PreToolUse: the handoff file is outside the project, so the hook approves exactly that one Write."""
+
+    def write(self, file_path, **extra):
+        return dict({"hook_event_name": "PreToolUse", "session_id": "sess-1", "tool_name": "Write",
+                     "tool_input": {"file_path": file_path, "content": "# handoff"}, "tool_use_id": "t1"}, **extra)
+
+    def test_the_sessions_own_handoff_write_is_allowed(self):
+        out = cw.run_hook(self.write(cw.handoff_path("sess-1")), CFG)
+        self.assertEqual(out, {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "allow",
+            "permissionDecisionReason": "context-watch: this session's handoff file"}})
+        # needs no transcript and no prior firing, and writes no state
+        self.assertFalse(os.path.exists(os.path.join(cw._state_dir(), "sess-1.json")))
+
+    def test_every_other_write_is_left_to_the_user(self):
+        own = cw.handoff_path("sess-1")
+        os.makedirs(os.path.dirname(own))
+        outside = os.path.join(self.tmp, "elsewhere.md")
+        link = os.path.join(os.path.dirname(own), "link")
+        os.symlink(self.tmp, link)
+        for payload in (
+                self.write(cw.handoff_path("other")),                                   # another session's file
+                self.write(os.path.join(os.path.dirname(own), "sess-2.md")),
+                self.write(os.path.relpath(own)),                                       # relative
+                self.write(own + ".bak"),
+                self.write(os.path.join(os.path.dirname(own), "x", "..", "..", "sess-1.json")),
+                self.write(os.path.join(link, "..", "sess-1.md")),                      # ".." out through a symlink
+                self.write(outside),
+                self.write(None),
+                self.write(own, tool_name="Edit"),
+                self.write(own, tool_name="Bash", tool_input={"command": f"cat > {own}"}),
+                self.write(own, agent_id="a1", agent_type="general-purpose"),           # subagents
+                self.write(own, session_id=""),
+                self.write(own, tool_input="not a dict")):
+            try:
+                self.assertIsNone(cw.run_hook(payload, CFG), payload)
+            except AttributeError:
+                self.fail(f"crashed on {payload}")
+        self.assertIsNone(cw.run_hook(self.write(own), dict(CFG, disabled=True)))
+
+    def test_a_symlinked_handoff_file_is_not_approved(self):
+        own = cw.handoff_path("sess-1")
+        os.makedirs(os.path.dirname(own))
+        os.symlink(os.path.join(self.tmp, "victim"), own)
+        self.assertIsNone(cw.run_hook(self.write(own), CFG))
+
+    def test_a_symlinked_state_dir_still_matches(self):
+        # dotfiles setups symlink ~/.local/state; both sides resolve through it
+        real = os.path.join(self.tmp, "real-state")
+        os.makedirs(real)
+        os.symlink(real, os.path.join(self.tmp, "linked-state"))
+        os.environ["XDG_STATE_HOME"] = os.path.join(self.tmp, "linked-state")
+        self.assertIsNotNone(cw.run_hook(self.write(cw.handoff_path("sess-1")), CFG))
+
+    def test_normalized_spelling_of_the_path_is_allowed(self):
+        own = cw.handoff_path("sess-1")
+        spelled = os.path.join(os.path.dirname(own), ".", "sess-1.md")
+        self.assertIsNotNone(cw.run_hook(self.write(spelled), CFG))
+
+
 def run_shim(entry, payload, env=None):
     return subprocess.run(["bash", SHIM, entry], input=json.dumps(payload), capture_output=True, text=True,
                           env=env or os.environ, cwd="/")
@@ -391,8 +497,10 @@ class Shim(Tmp):
         out = run_shim(CORE, self.payload(path))
         self.assertEqual(out.returncode, 0)
         self.assertIn("additionalContext", json.loads(out.stdout)["hookSpecificOutput"])
-        stop = run_shim(CORE, dict(self.payload(path), hook_event_name="PostToolUse", session_id="sess-2"))
-        self.assertIs(json.loads(stop.stdout)["continue"], False)
+        stop = json.loads(run_shim(CORE, dict(self.payload(path), hook_event_name="PostToolUse",
+                                              session_id="sess-2")).stdout)
+        self.assertNotIn("continue", stop)
+        self.assertIn("Stop now", stop["hookSpecificOutput"]["additionalContext"])
 
     def test_a_broken_entry_never_blocks_the_prompt(self):
         # python exits 2 for a missing script; exit 2 from UserPromptSubmit blocks the prompt.
@@ -425,11 +533,12 @@ class Plugin(Tmp):
     def test_plugin_ships_the_prompt_and_tool_hooks_and_they_run(self):
         with open(os.path.join(PLUGIN, "hooks", "hooks.json")) as f:
             hooks = json.load(f)["hooks"]
-        self.assertEqual(sorted(hooks), ["PostToolUse", "PostToolUseFailure", "UserPromptSubmit"])
+        self.assertEqual(sorted(hooks), ["PostToolUse", "PostToolUseFailure", "PreToolUse", "UserPromptSubmit"])
         commands = {e: hooks[e][0]["hooks"][0]["command"] for e in hooks}
         self.assertEqual(len(set(commands.values())), 1)
         for event in ("PostToolUse", "PostToolUseFailure"):
             self.assertNotIn("matcher", hooks[event][0])  # every tool
+        self.assertEqual(hooks["PreToolUse"][0]["matcher"], "Write")  # only the handoff write needs approving
         command = commands["UserPromptSubmit"]
         path = self.transcript([usage_row(215_000)])
         # The way the host runs it: sh -c, from /, with a bare system PATH.
@@ -472,6 +581,8 @@ class Status(Tmp):
         self.assertEqual(out.returncode, 0)
         self.assertIn("context: ~250k tokens (6.2x session start)", out.stdout)
         self.assertIn("status: past WARN", out.stdout)
+        # the session id is the transcript's name, so the model writes where the hook would point
+        self.assertIn(f"handoff file: {cw.handoff_path('t')}\n", out.stdout)
 
     def test_status_after_compaction(self):
         out = self.status("--transcript", self.transcript([usage_row(450_000), boundary_row(3_000)]))
@@ -485,6 +596,7 @@ class Status(Tmp):
         env = dict(os.environ, CLAUDE_CONFIG_DIR=home, CLAUDE_CODE_SESSION_ID="abc-123")
         out = self.status(env=env)
         self.assertIn("110k below WARN", out.stdout)
+        self.assertIn(f"handoff file: {cw.handoff_path('abc-123')}", out.stdout)
 
     def test_status_without_a_session_explains(self):
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_SESSION_ID"}

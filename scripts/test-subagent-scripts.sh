@@ -203,11 +203,11 @@ mkdir -p "$link_dir"
 ln -sf "$oc" "$link_dir/opencode-delegate"
 out="$(run_delegate "$link_dir/opencode-delegate" policy 2>&1)" \
   || fail "opencode: invocation through a symlink failed: $out"
-echo "$out" | grep -q '^DELEGATION_POLICY:' || fail "opencode: symlinked invocation lost its skill dir: $out"
+grep -q <<<"$out" '^DELEGATION_POLICY:' || fail "opencode: symlinked invocation lost its skill dir: $out"
 
 # the usage block must not silently truncate as the header grows
 out="$(run_delegate "$oc" --help)"
-echo "$out" | grep -q 'Legacy forms still accepted' || fail "opencode: --help truncates the header: $out"
+grep -q <<<"$out" 'Legacy forms still accepted' || fail "opencode: --help truncates the header: $out"
 
 # --- attempt cost -----------------------------------------------------------
 
@@ -226,12 +226,12 @@ rm -f "$conf_file"
 
 # an unconfigured conf is conservative, not permissive
 out="$(run_delegate "$oc" policy)"
-echo "$out" | grep -q '^DELEGATION_POLICY: explicit$' || fail "opencode: default policy is not explicit: $out"
-echo "$out" | grep -q '^WORKER_MODEL: none$' || fail "opencode: unset worker model not reported: $out"
+grep -q <<<"$out" '^DELEGATION_POLICY: explicit$' || fail "opencode: default policy is not explicit: $out"
+grep -q <<<"$out" '^WORKER_MODEL: none$' || fail "opencode: unset worker model not reported: $out"
 
 # retention is configurable and surfaced, not a hard-coded 7-day wipe
-echo "$out" | grep -q '^RETENTION_DAYS: 90$' || fail "opencode: default retention not reported: $out"
-echo "$out" | grep -q '^RAW_RETENTION_DAYS: 7$' || fail "opencode: raw retention not reported: $out"
+grep -q <<<"$out" '^RETENTION_DAYS: 90$' || fail "opencode: default retention not reported: $out"
+grep -q <<<"$out" '^RAW_RETENTION_DAYS: 7$' || fail "opencode: raw retention not reported: $out"
 run_delegate "$oc" policy --json | jq -e '.retention_days == 90 and .raw_retention_days == 7' >/dev/null \
   || fail "opencode: retention missing from policy --json"
 
@@ -247,7 +247,7 @@ msg="$(run_delegate "$oc" --model x/y "task" 2>&1)"
 code=$?
 set -e
 [ "$code" -eq 2 ] || fail "opencode: policy off should exit 2, got $code"
-echo "$msg" | grep -q 'delegation is disabled' || fail "opencode: policy off lacks actionable error: $msg"
+grep -q <<<"$msg" 'delegation is disabled' || fail "opencode: policy off lacks actionable error: $msg"
 
 # an invalid policy is a config error, not a silent default
 echo 'OPENCODE_SUBAGENT_DELEGATION_POLICY=sometimes' >"$conf_file"
@@ -269,7 +269,7 @@ msg="$(run_delegate "$oc" "task" 2>&1)"
 code=$?
 set -e
 [ "$code" -eq 2 ] || fail "opencode: missing worker model should exit 2, got $code"
-echo "$msg" | grep -q 'no worker model' || fail "opencode: missing-model error unclear: $msg"
+grep -q <<<"$msg" 'no worker model' || fail "opencode: missing-model error unclear: $msg"
 
 # from here on a worker model is configured, so launches need not name one
 mkdir -p "$(dirname "$conf_file")"
@@ -305,15 +305,15 @@ mv "$conf_file.tmp" "$conf_file"
 
 # launch returns immediately and names both the Task and its first Attempt
 out="$(run_delegate "$oc" --model anthropic/claude-haiku-4-5 "do the thing")"
-echo "$out" | grep -q '^TASK: task_' || fail "opencode: no TASK line: $out"
-echo "$out" | grep -q '^JOB: task_' || fail "opencode: legacy JOB alias missing: $out"
-echo "$out" | grep -q '^ATTEMPT: attempt_001$' || fail "opencode: no ATTEMPT line: $out"
-echo "$out" | grep -q '^WATCH:' || fail "opencode: no WATCH line: $out"
-echo "$out" | grep -q '^STATUS:' || fail "opencode: legacy STATUS guidance missing: $out"
-echo "$out" | grep -q '^PROGRESS:' || fail "opencode: no PROGRESS line: $out"
-echo "$out" | grep -q '^REPORT:' || fail "opencode: no REPORT line: $out"
-echo "$out" | grep -q '^PROVIDER_REPORT:' || fail "opencode: legacy PROVIDER_REPORT alias missing: $out"
-echo "$out" | grep -q '^RESULT:' || fail "opencode: legacy RESULT alias missing: $out"
+grep -q <<<"$out" '^TASK: task_' || fail "opencode: no TASK line: $out"
+grep -q <<<"$out" '^JOB: task_' || fail "opencode: legacy JOB alias missing: $out"
+grep -q <<<"$out" '^ATTEMPT: attempt_001$' || fail "opencode: no ATTEMPT line: $out"
+grep -q <<<"$out" '^WATCH:' || fail "opencode: no WATCH line: $out"
+grep -q <<<"$out" '^STATUS:' || fail "opencode: legacy STATUS guidance missing: $out"
+grep -q <<<"$out" '^PROGRESS:' || fail "opencode: no PROGRESS line: $out"
+grep -q <<<"$out" '^REPORT:' || fail "opencode: no REPORT line: $out"
+grep -q <<<"$out" '^PROVIDER_REPORT:' || fail "opencode: legacy PROVIDER_REPORT alias missing: $out"
+grep -q <<<"$out" '^RESULT:' || fail "opencode: legacy RESULT alias missing: $out"
 task="$(task_of "$out")"
 td="$(taskdir_of "$task")"
 
@@ -341,16 +341,16 @@ grep -q '^name: workflow-worker$' "$oc_agent" || fail "opencode: synced agent is
 res="$(run_delegate "$oc" --wait "$task" --poll-timeout 30)"
 grep -qE 'run --standalone --format json --agent workflow-worker --model anthropic/claude-haiku-4-5 --title workflow-worker task_[0-9-]+/attempt_001 do the thing' "$stub_dir/opencode.args" \
   || fail "opencode: unexpected args: $(cat "$stub_dir/opencode.args")"
-echo "$res" | grep -q '^SESSION: ses_oc1$' || fail "opencode: session not extracted: $res"
-echo "$res" | grep -q '^COST: 0.0042$' || fail "opencode: cost not extracted: $res"
-echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: exit line missing: $res"
-echo "$res" | grep -q -- '--- REPORT ---' || fail "opencode: report marker missing: $res"
+grep -q <<<"$res" '^SESSION: ses_oc1$' || fail "opencode: session not extracted: $res"
+grep -q <<<"$res" '^COST: 0.0042$' || fail "opencode: cost not extracted: $res"
+grep -q <<<"$res" '^EXIT: 0$' || fail "opencode: exit line missing: $res"
+grep -q <<<"$res" -- '--- REPORT ---' || fail "opencode: report marker missing: $res"
 
 # the worker's semantic outcome is promoted into state, not left as prose
-echo "$res" | grep -q '^WORKER: done$' || fail "opencode: worker outcome not machine-readable: $res"
-echo "$res" | grep -q '^TRANSPORT: finished$' || fail "opencode: transport outcome missing: $res"
-echo "$res" | grep -q '^VERIFICATION: not_run$' || fail "opencode: verification dimension missing: $res"
-echo "$res" | grep -q '^SUPERVISOR: pending$' || fail "opencode: supervisor dimension missing: $res"
+grep -q <<<"$res" '^WORKER: done$' || fail "opencode: worker outcome not machine-readable: $res"
+grep -q <<<"$res" '^TRANSPORT: finished$' || fail "opencode: transport outcome missing: $res"
+grep -q <<<"$res" '^VERIFICATION: not_run$' || fail "opencode: verification dimension missing: $res"
+grep -q <<<"$res" '^SUPERVISOR: pending$' || fail "opencode: supervisor dimension missing: $res"
 jq -e '.worker == "done" and .worker_files_changed == ["foo.txt"]' \
   "$td/attempts/attempt_001/result.json" >/dev/null \
   || fail "opencode: worker report not parsed into result.json"
@@ -416,7 +416,7 @@ res="$(run_delegate "$oc" verify "$task" --label acceptance -- sh -c 'echo boom;
 code=$?
 set -e
 [ "$code" -eq 1 ] || fail "opencode: failed verification should exit 1, got $code"
-echo "$res" | grep -q '^VERIFICATION: ver_001 failed (exit 3)$' || fail "opencode: verification result wrong: $res"
+grep -q <<<"$res" '^VERIFICATION: ver_001 failed (exit 3)$' || fail "opencode: verification result wrong: $res"
 jq -e '.result == "failed" and .exit_code == 3 and .label == "acceptance"' "$td/verifications/ver_001.json" >/dev/null \
   || fail "opencode: verification record wrong: $(cat "$td/verifications/ver_001.json")"
 jq -e '.command | test("echo boom")' "$td/verifications/ver_001.json" >/dev/null \
@@ -436,11 +436,11 @@ msg="$(run_delegate "$oc" retry "$task" "fix: narrow correction" 2>&1)"
 code=$?
 set -e
 [ "$code" -eq 2 ] || fail "opencode: retry without --reason should exit 2, got $code"
-echo "$msg" | grep -q 'reason' || fail "opencode: retry error should name --reason: $msg"
+grep -q <<<"$msg" 'reason' || fail "opencode: retry error should name --reason: $msg"
 
 : >"$stub_dir/opencode.args"
 out="$(STUB_STATUS=BLOCKED run_delegate "$oc" retry "$task" --reason "typecheck still fails in foo.txt" "fix: correct the foo type")"
-echo "$out" | grep -q '^ATTEMPT: attempt_002$' || fail "opencode: retry did not create attempt_002: $out"
+grep -q <<<"$out" '^ATTEMPT: attempt_002$' || fail "opencode: retry did not create attempt_002: $out"
 grep -qx 'fix: correct the foo type' "$td/attempts/attempt_002/request.md" \
   || fail "opencode: correction prompt not persisted verbatim"
 jq -e '.retry_of == "attempt_001" and .kind == "retry" and .session_reused == true and .requested_session == "ses_oc1"' \
@@ -475,8 +475,8 @@ jq -e '.disposition.decision == "retry" and (.disposition.reason | test("write-t
 
 : >"$stub_dir/opencode.args"
 out="$(run_delegate "$oc" resume ses_oc1 "Use write-through caching.")"
-echo "$out" | grep -q "^TASK: $task$" || fail "opencode: resume by session did not reattach to the task: $out"
-echo "$out" | grep -q '^ATTEMPT: attempt_003$' || fail "opencode: resume did not create attempt_003: $out"
+grep -q <<<"$out" "^TASK: $task$" || fail "opencode: resume by session did not reattach to the task: $out"
+grep -q <<<"$out" '^ATTEMPT: attempt_003$' || fail "opencode: resume did not create attempt_003: $out"
 run_delegate "$oc" wait "$task" --poll-timeout 30 >/dev/null
 grep -q -- '--session ses_oc1 Use write-through caching.' "$stub_dir/opencode.args" \
   || fail "opencode: resume by session id did not reuse it: $(cat "$stub_dir/opencode.args")"
@@ -559,7 +559,7 @@ STUB_DIR="$stub_dir" XDG_STATE_HOME="$stub_dir/state" bash -c '
 ' >/dev/null &
 stale_finalizer=$!
 out="$(STUB_SLEEP=4 run_delegate "$oc" retry "$fence_task" --reason "exercise stale fencing" "second attempt")"
-echo "$out" | grep -q '^ATTEMPT: attempt_002$' || fail "opencode: concurrent retry did not start attempt_002: $out"
+grep -q <<<"$out" '^ATTEMPT: attempt_002$' || fail "opencode: concurrent retry did not start attempt_002: $out"
 wait "$stale_finalizer"
 jq -e '.authoritative == false' "$fd/attempts/attempt_001/result.json" >/dev/null \
   || fail "opencode: a superseded attempt was still treated as authoritative"
@@ -579,7 +579,11 @@ wait "$retry_a"
 wait "$retry_b"
 set -e
 codes="$(sort "$stub_dir/retry-a.code" "$stub_dir/retry-b.code" | tr '\n' ' ')"
-[ "$codes" = "0 2 " ] || fail "opencode: concurrent retries did not produce one winner (codes: $codes)"
+[ "$codes" = "0 2 " ] || fail "opencode: concurrent retries did not produce one winner (codes: $codes)
+--- retry A: $(cat "$stub_dir/retry-a.out")
+--- retry B: $(cat "$stub_dir/retry-b.out")
+--- events: $(jq -c '{seq, type, attempt, pid}' "$fd/events.jsonl" | tail -n 20)
+--- attempt_003 result: $(cat "$fd/attempts/attempt_003/result.json" 2>/dev/null)"
 jq -e '.attempt_count == 3 and .current_attempt == "attempt_003" and .state == "running"' "$fd/task.json" >/dev/null \
   || fail "opencode: concurrent retries corrupted Task state: $(cat "$fd/task.json")"
 [ "$(find "$fd/attempts" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 3 ] \
@@ -601,7 +605,7 @@ STUB_DIR="$stub_dir" bash -c '
   lock_release
 ' &
 lock_holder=$!
-for _ in {1..30}; do [ -f "$stub_dir/lock-ready" ] && break; sleep 0.1; done
+for _ in {1..300}; do [ -f "$stub_dir/lock-ready" ] && break; sleep 0.1; done
 [ -f "$stub_dir/lock-ready" ] || fail "opencode: lock holder did not start"
 STUB_DIR="$stub_dir" bash -c '
   set -euo pipefail
@@ -631,7 +635,7 @@ STUB_DIR="$stub_dir" bash -c '
   sleep 30
 ' &
 signal_holder=$!
-for _ in {1..30}; do [ -f "$stub_dir/signal-lock-ready" ] && break; sleep 0.1; done
+for _ in {1..300}; do [ -f "$stub_dir/signal-lock-ready" ] && break; sleep 0.1; done
 kill -TERM "$signal_holder"
 set +e
 wait "$signal_holder"
@@ -649,6 +653,103 @@ STUB_DIR="$stub_dir" bash -c '
   lock_release
 ' || fail "opencode: stale fingerprint lock was not recoverable"
 
+# Reaping a stale lock never breaks a newer live one. Force the interleaving
+# that made CI flaky: a contender reads the old owner's PID, the old owner then
+# releases and exits, a third process takes the lock, and only then does the
+# contender find the old PID dead. It must wait for the new holder, not reap
+# its lock. FIFOs sequence the three processes, so no step depends on timing.
+race="$stub_dir/lock-race"
+mkdir "$race"
+mkfifo "$race/to_c" "$race/from_c" "$race/to_n" "$race/from_n"
+sleep 300 &
+old_owner=$!
+mkdir "$fd/.lock"
+printf '%s\n' "$old_owner" >"$fd/.lock/owner.pid"
+printf 'old-owner-token\n' >"$fd/.lock/owner.token"
+STUB_DIR="$stub_dir" bash -c '
+  set -euo pipefail
+  state_root="'"$stub_dir"'/state/workflow-skills/subagents"; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  paused=0 reported=0
+  # Pause at the first liveness probe (the old owner), and report the first
+  # probe of any other PID, which means the contender is waiting on a holder.
+  kill() {
+    if [ "$1" = -0 ] && [ "$paused" -eq 0 ]; then
+      paused=1; echo paused >"'"$race"'/from_c"; read -r _ <"'"$race"'/to_c"
+    elif [ "$1" = -0 ] && [ "$2" != "'"$old_owner"'" ] && [ "$reported" -eq 0 ]; then
+      reported=1; echo waiting >"'"$race"'/from_c"
+    fi
+    builtin kill "$@"
+  }
+  lock_acquire "'"$fd"'"
+  echo acquired >"'"$race"'/from_c"
+  lock_release
+' &
+contender=$!
+read -r c_msg <"$race/from_c"
+[ "$c_msg" = paused ] || { builtin kill "$contender" "$old_owner" 2>/dev/null; fail "opencode: lock race contender did not probe the old owner ($c_msg)"; }
+# The old owner releases and exits; a new holder takes the lock.
+rm -rf "$fd/.lock"
+kill "$old_owner"
+wait "$old_owner" 2>/dev/null || true
+STUB_DIR="$stub_dir" bash -c '
+  set -euo pipefail
+  state_root="'"$stub_dir"'/state/workflow-skills/subagents"; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  lock_acquire "'"$fd"'"
+  echo held >"'"$race"'/from_n"
+  read -r _ <"'"$race"'/to_n"
+  if [ "$(cat "'"$fd"'/.lock/owner.token" 2>/dev/null)" = "$lock_token" ]; then s=intact; else s=broken; fi
+  echo "$s" >"'"$race"'/from_n"
+  lock_release
+' &
+new_holder=$!
+read -r _ <"$race/from_n"
+echo go >"$race/to_c"
+read -r c_msg <"$race/from_c"
+echo go >"$race/to_n"
+read -r n_status <"$race/from_n"
+if [ "$c_msg" = acquired ]; then
+  # The bug: the contender reaped the live lock while the new holder held it.
+  wait "$new_holder" "$contender" 2>/dev/null || true
+  fail "opencode: a contender reaped a live Task lock after its observed owner exited (holder lock $n_status)"
+fi
+[ "$c_msg" = waiting ] || fail "opencode: unexpected lock race contender state ($c_msg)"
+[ "$n_status" = intact ] || fail "opencode: the live holder lost its lock during the race"
+read -r c_msg <"$race/from_c"
+wait "$new_holder" || fail "opencode: lock race holder failed"
+wait "$contender" || fail "opencode: lock race contender failed"
+[ "$c_msg" = acquired ] || fail "opencode: contender never acquired the lock after the live holder released"
+[ ! -e "$fd/.lock" ] && [ ! -e "$fd/.lock.reap" ] || fail "opencode: lock race left lock state behind"
+
+# mkdir is not a mutex. uutils mkdir (Ubuntu 26.04's coreutils) exits 0 when
+# it races another mkdir of the same path, which let two retries hold the Task
+# lock at once in CI. Shim mkdir to always succeed: a contender must still see
+# the live holder's lock as busy. FIFOs hold the holder in place, no timing.
+mkfifo "$race/held" "$race/release"
+STUB_DIR="$stub_dir" bash -c '
+  set -euo pipefail
+  state_root="'"$stub_dir"'/state/workflow-skills/subagents"; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  lock_acquire "'"$fd"'"
+  echo held >"'"$race"'/held"
+  read -r _ <"'"$race"'/release"
+  lock_release
+' &
+mkdir_holder=$!
+read -r _ <"$race/held"
+mkdir_contender="$(STUB_DIR="$stub_dir" bash -c '
+  set -euo pipefail
+  state_root="'"$stub_dir"'/state/workflow-skills/subagents"; agent_name=workflow-worker
+  . "'"$repo_root"'/skills/opencode-subagent/scripts/orchestration.sh"
+  mkdir() { command mkdir -p "$@"; }
+  if lock_try_acquire "'"$fd"'"; then echo acquired; lock_release; else echo busy; fi
+')"
+echo go >"$race/release"
+wait "$mkdir_holder" || fail "opencode: mkdir-shim lock holder failed"
+[ "$mkdir_contender" = busy ] || fail "opencode: a racing mkdir that reports success broke the Task lock ($mkdir_contender)"
+[ ! -e "$fd/.lock" ] || fail "opencode: mkdir-shim race left lock state behind"
+
 # Concurrent event writers preserve valid JSONL and a gap-free unique sequence.
 for i in {1..12}; do
   STUB_DIR="$stub_dir" bash -c '
@@ -660,7 +761,7 @@ for i in {1..12}; do
 done
 wait
 jq -s -e '([.[].seq] == [range(1; length + 1)]) and ([.[].seq] | unique | length) == length' \
-  "$fd/events.jsonl" >/dev/null || fail "opencode: concurrent event append broke JSONL or event sequences"
+  "$fd/events.jsonl" >/dev/null || fail "opencode: concurrent event append broke JSONL or event sequences: $(jq -c .seq "$fd/events.jsonl" | tr '\n' ' ')"
 jq -s -e '[.[] | select(.type == "worker_done" and .attempt == "attempt_003")] | length == 1' \
   "$fd/events.jsonl" >/dev/null || fail "opencode: duplicate terminal event recorded for attempt_003"
 
@@ -676,12 +777,12 @@ res="$(run_delegate "$oc" --wait "$task" --poll-timeout 1)"
 code=$?
 set -e
 [ "$code" -eq 3 ] || fail "opencode: running wait should exit 3, got $code"
-echo "$res" | grep -q '^RUNNING' || fail "opencode: no RUNNING line: $res"
-echo "$res" | grep -q 'possibly_stalled=false' || fail "opencode: no liveness in RUNNING line: $res"
+grep -q <<<"$res" '^RUNNING' || fail "opencode: no RUNNING line: $res"
+grep -q <<<"$res" 'possibly_stalled=false' || fail "opencode: no liveness in RUNNING line: $res"
 # a poll reports progress in one line; the six-line watch block belongs to the
 # launch that printed it once, not to every poll
-echo "$res" | grep -q '^WATCH:' && fail "opencode: a poll must not reprint the watch block: $res"
-echo "$res" | grep -qE '^RUNNING .*returned=' || fail "opencode: RUNNING line lost its return reason: $res"
+grep -q <<<"$res" '^WATCH:' && fail "opencode: a poll must not reprint the watch block: $res"
+grep -q <<<"$res"E '^RUNNING .*returned=' || fail "opencode: RUNNING line lost its return reason: $res"
 set +e
 res="$(run_delegate "$oc" status "$task" --json)"
 set -e
@@ -689,7 +790,7 @@ echo "$res" | jq -e '.liveness.process_alive == true and .task_state == "running
   || fail "opencode: liveness missing from status --json: $res"
 
 # the session export feeds provider progress while the fresh run is still going
-for _ in 1 2 3; do
+for _ in $(seq 1 30); do
   if grep -q 'slow task' "$td/attempts/attempt_001/provider-progress.json"; then break; fi
   sleep 1
 done
@@ -717,10 +818,10 @@ msg="$(run_delegate "$oc" verify "$task" -- true 2>&1)"
 code=$?
 set -e
 [ "$code" -eq 2 ] || fail "opencode: verify during a running attempt should exit 2, got $code"
-echo "$msg" | grep -q "outside the worker's turn" || fail "opencode: verify refusal unclear: $msg"
+grep -q <<<"$msg" "outside the worker's turn" || fail "opencode: verify refusal unclear: $msg"
 
 res="$(run_delegate "$oc" --wait "$task" --poll-timeout 30)"
-echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: slow job did not finish clean: $res"
+grep -q <<<"$res" '^EXIT: 0$' || fail "opencode: slow job did not finish clean: $res"
 
 # `cancel --keep-task` stops the attempt but leaves the Task retryable
 out="$(STUB_SLEEP=30 run_delegate "$oc" start "long task")"
@@ -732,7 +833,7 @@ res="$(run_delegate "$oc" cancel "$task" --keep-task --reason "stalled")"
 code=$?
 set -e
 [ "$code" -eq 130 ] || fail "opencode: cancel should exit 130, got $code"
-echo "$res" | grep -q '^TRANSPORT: cancelled$' || fail "opencode: cancel result unhelpful: $res"
+grep -q <<<"$res" '^TRANSPORT: cancelled$' || fail "opencode: cancel result unhelpful: $res"
 jq -e '.state == "awaiting_supervisor"' "$td/task.json" >/dev/null \
   || fail "opencode: --keep-task should not close the Task"
 run_delegate "$oc" retry "$task" --reason "re-run after the stall" "continue" >/dev/null
@@ -877,8 +978,8 @@ grep -q -- '--session ses_legacy fix: rename foo' "$stub_dir/opencode.args" \
 out="$(STUB_RESUME_HANG=1 run_delegate "$oc" --resume ses_hang "fix: hung stream")"
 task="$(task_of "$out")"
 res="$(run_delegate "$oc" --wait "$task" --poll-timeout 30)"
-echo "$res" | grep -q '^SESSION: ses_hang$' || fail "opencode: recovered resume session missing: $res"
-echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: provider-complete resume did not finish cleanly: $res"
+grep -q <<<"$res" '^SESSION: ses_hang$' || fail "opencode: recovered resume session missing: $res"
+grep -q <<<"$res" '^EXIT: 0$' || fail "opencode: provider-complete resume did not finish cleanly: $res"
 grep -q 'STATUS: DONE' "$(taskdir_of "$task")/attempts/attempt_001/worker-report.txt" \
   || fail "opencode: recovered resume provider report missing"
 
@@ -886,7 +987,7 @@ grep -q 'STATUS: DONE' "$(taskdir_of "$task")/attempts/attempt_001/worker-report
 out="$(STUB_FRESH_HANG=1 run_delegate "$oc" "hung fresh stream")"
 task="$(task_of "$out")"
 res="$(run_delegate "$oc" --wait "$task" --poll-timeout 10)"
-echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: provider-complete fresh run did not finish cleanly: $res"
+grep -q <<<"$res" '^EXIT: 0$' || fail "opencode: provider-complete fresh run did not finish cleanly: $res"
 
 # exit 0 without a provider-final response is incomplete, not successful
 out="$(STUB_NO_FINAL=1 run_delegate "$oc" "incomplete task")"
@@ -900,18 +1001,18 @@ jq -e '.outcome.transport == "incomplete" and .outcome.worker == "no_report"' \
   "$(taskdir_of "$task")/task.json" >/dev/null || fail "opencode: incomplete turn misclassified"
 jq -e '.failure_class == "provider_turn_incomplete" and .recommended_action == "resume_same_session"' \
   "$(taskdir_of "$task")/task.json" >/dev/null || fail "opencode: incomplete turn lacks recovery guidance"
-echo "$res" | grep -q 'before producing a provider-final response' \
+grep -q <<<"$res" 'before producing a provider-final response' \
   || fail "opencode: incomplete turn lacks actionable report: $res"
 
 # session export failures fall back to CLI output and still finalize job state
 out="$(STUB_EXPORT_FAIL=1 run_delegate "$oc" "export fallback")"
 task="$(task_of "$out")"
 res="$(run_delegate "$oc" --wait "$task" --poll-timeout 30)"
-echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: export failure replaced successful CLI exit: $res"
+grep -q <<<"$res" '^EXIT: 0$' || fail "opencode: export failure replaced successful CLI exit: $res"
 # the report survived and was parsed: its status became the worker outcome and
 # its VERIFICATION text is rendered
-echo "$res" | grep -q '^WORKER: done$' || fail "opencode: export failure lost the CLI report's status: $res"
-echo "$res" | grep -q 'stub check -> pass' || fail "opencode: export failure lost the CLI report body: $res"
+grep -q <<<"$res" '^WORKER: done$' || fail "opencode: export failure lost the CLI report's status: $res"
+grep -q <<<"$res" 'stub check -> pass' || fail "opencode: export failure lost the CLI report body: $res"
 jq -e '.outcome.transport == "finished"' "$(taskdir_of "$task")/task.json" >/dev/null \
   || fail "opencode: export failure stranded running status"
 
@@ -926,7 +1027,7 @@ echo "$out" | jq -e '.outcome.worker == "done" and (.report | contains("STATUS: 
 # tool activity and timestamps for the progress file and stall calculation.
 out="$(STUB_EXPORT_FAIL=1 STUB_SLEEP=4 run_delegate "$oc" start "stream progress fallback")"
 task="$(task_of "$out")"
-for _ in 1 2 3; do
+for _ in $(seq 1 30); do
   if jq -e 'length > 0' "$(taskdir_of "$task")/attempts/attempt_001/provider-progress.json" >/dev/null 2>&1; then break; fi
   sleep 1
 done
@@ -938,7 +1039,7 @@ STUB_EXPORT_FAIL=1 run_delegate "$oc" wait "$task" --poll-timeout 30 >/dev/null
 out="$(STUB_FINISH_DRIFT=1 run_delegate "$oc" "finish drift")"
 task="$(task_of "$out")"
 res="$(run_delegate "$oc" --wait "$task" --poll-timeout 30)"
-echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: finish-state drift caused false exit 4: $res"
+grep -q <<<"$res" '^EXIT: 0$' || fail "opencode: finish-state drift caused false exit 4: $res"
 
 # session ids reach the CLI as one argument, never interpolated into a query
 : >"$stub_dir/opencode-export.args"
@@ -951,8 +1052,8 @@ grep -Fxq "abc' OR '1'='1" "$stub_dir/opencode-export.args" \
 out="$(STUB_EXPORT_FAIL=1 STUB_STEPS=2 run_delegate "$oc" "stream only, tool step first")"
 task="$(task_of "$out")"
 res="$(run_delegate "$oc" --wait "$task" --poll-timeout 30)"
-echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: a 2.x stream without a closing step_finish was not complete: $res"
-echo "$res" | grep -q '^WORKER: done$' || fail "opencode: 2.x stream report not parsed: $res"
+grep -q <<<"$res" '^EXIT: 0$' || fail "opencode: a 2.x stream without a closing step_finish was not complete: $res"
+grep -q <<<"$res" '^WORKER: done$' || fail "opencode: 2.x stream report not parsed: $res"
 
 # a turn that ended on a tool step is incomplete even when the export cannot be read
 out="$(STUB_EXPORT_FAIL=1 STUB_NO_FINAL=1 run_delegate "$oc" "stream only, no final text")"
@@ -977,10 +1078,12 @@ run_delegate "$oc" decide "$res_task" reject --reason "baseline fixture" >/dev/n
 # provider errors arrive in the 2.x stream, not on stderr, and still classify
 out="$(STUB_STREAM_ERROR='Unauthorized: invalid api key' run_delegate "$oc" "auth failure")"
 task="$(task_of "$out")"
-# wait returns early on a stream error; the runner finalizes just after
-for _ in $(seq 1 20); do
-  [ -f "$(taskdir_of "$task")/attempts/attempt_001/result.json" ] && break
-  sleep 0.5
+# wait returns early on a stream error; the runner finalizes just after. Poll
+# for the classification itself: result.json lands before task.json is
+# classified, and a loaded single-core runner can take well over 10 seconds.
+for _ in $(seq 1 600); do
+  [ "$(jq -r '.failure_class // empty' "$(taskdir_of "$task")/task.json" 2>/dev/null)" != "" ] && break
+  sleep 0.1
 done
 jq -e '.failure_class == "authentication_error" and .recommended_action == "repair_infrastructure"' \
   "$(taskdir_of "$task")/task.json" >/dev/null \
@@ -1021,14 +1124,14 @@ msg="$(STUB_VERSION=1.18.32 run_delegate "$oc" "old cli" 2>&1)"
 code=$?
 set -e
 [ "$code" -eq 127 ] || fail "opencode: OpenCode 1.x should exit 127, got $code"
-echo "$msg" | grep -q 'needs OpenCode 2' || fail "opencode: unsupported-version error unclear: $msg"
+grep -q <<<"$msg" 'needs OpenCode 2' || fail "opencode: unsupported-version error unclear: $msg"
 [ ! -s "$stub_dir/opencode.args" ] || fail "opencode: launched a worker on an unsupported CLI"
 
 # the session id is recorded before the stream says anything, so a cancel
 # during a slow first response still leaves something to resume
 out="$(STUB_SESSION=ses_silent STUB_SILENT_SLEEP=30 run_delegate "$oc" start "silent start")"
 task="$(task_of "$out")"
-for _ in $(seq 1 10); do
+for _ in $(seq 1 60); do
   [ "$(jq -r '.session_id // ""' "$(taskdir_of "$task")/task.json")" = "ses_silent" ] && break
   sleep 0.5
 done
@@ -1040,7 +1143,7 @@ jq -e '.session_id == "ses_silent"' "$(taskdir_of "$task")/task.json" >/dev/null
 
 # `help` is a subcommand, not a task
 out="$(run_delegate "$oc" help)"
-echo "$out" | grep -q 'Legacy forms still accepted' || fail "opencode: help subcommand did not print usage: $out"
+grep -q <<<"$out" 'Legacy forms still accepted' || fail "opencode: help subcommand did not print usage: $out"
 
 # --- usage errors ------------------------------------------------------------
 
@@ -1072,7 +1175,7 @@ msg="$(STUB_DIR="$stub_dir" PATH="/usr/bin:/bin" bash "$oc" "task" 2>&1)"
 code=$?
 set -e
 [ "$code" -eq 127 ] || fail "opencode: missing CLI should exit 127, got $code"
-echo "$msg" | grep -q 'doctor' || fail "opencode: missing-CLI error should mention --doctor: $msg"
+grep -q <<<"$msg" 'doctor' || fail "opencode: missing-CLI error should mention --doctor: $msg"
 
 # --- explicit operations ----------------------------------------------------
 
@@ -1088,25 +1191,25 @@ res="$(run_delegate "$oc" status "$task")"
 code=$?
 set -e
 [ "$code" -eq 3 ] || fail "opencode: status of a running task should exit 3, got $code"
-echo "$res" | grep -q '^RUNNING' || fail "opencode: status of a running task lacks RUNNING: $res"
+grep -q <<<"$res" '^RUNNING' || fail "opencode: status of a running task lacks RUNNING: $res"
 
 # ... and `wait` then blocks until it is done
 res="$(run_delegate "$oc" wait "$task" --poll-timeout 30)"
-echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: start/wait flow did not finish clean: $res"
+grep -q <<<"$res" '^EXIT: 0$' || fail "opencode: start/wait flow did not finish clean: $res"
 set +e
 res="$(run_delegate "$oc" status "$task")"
 code=$?
 set -e
 [ "$code" -eq 0 ] || fail "opencode: status of a finished task should exit 0, got $code"
-echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: status of a finished task lacks the result: $res"
+grep -q <<<"$res" '^EXIT: 0$' || fail "opencode: status of a finished task lacks the result: $res"
 
 # `run` blocks and returns the result in one call
 : >"$stub_dir/opencode.args"
 res="$(run_delegate "$oc" run --model blocking/model "blocking task")"
-echo "$res" | grep -q '^TASK: task_' || fail "opencode: run did not report its task id: $res"
-echo "$res" | grep -q '^EXIT: 0$' || fail "opencode: run did not block through completion: $res"
-echo "$res" | grep -q '^WORKER: done$' || fail "opencode: run lost the report: $res"
-echo "$res" | grep -q 'stub check -> pass' || fail "opencode: run lost the report body: $res"
+grep -q <<<"$res" '^TASK: task_' || fail "opencode: run did not report its task id: $res"
+grep -q <<<"$res" '^EXIT: 0$' || fail "opencode: run did not block through completion: $res"
+grep -q <<<"$res" '^WORKER: done$' || fail "opencode: run lost the report: $res"
+grep -q <<<"$res" 'stub check -> pass' || fail "opencode: run lost the report body: $res"
 grep -q -- '--model blocking/model' "$stub_dir/opencode.args" || fail "opencode: run dropped --model"
 
 # `retry --new-session` deliberately abandons the session
@@ -1196,7 +1299,7 @@ msg="$(cd "$sib_repo" && run_delegate "$oc" verify "$done_task" -- true 2>&1)"
 code=$?
 set -e
 [ "$code" -eq 2 ] || fail "opencode: verify with a live sibling in the tree should exit 2, got $code"
-echo "$msg" | grep -q "$sib_task" || fail "opencode: verify refusal must name the blocking Task: $msg"
+grep -q <<<"$msg" "$sib_task" || fail "opencode: verify refusal must name the blocking Task: $msg"
 
 # a live Task in a DIFFERENT tree must not block it
 jq -n '{schema: 2, task_id: "task_sibling_live", state: "running", cwd: "/nonexistent/other/tree",
@@ -1227,7 +1330,7 @@ res="$(run_delegate "$oc" wait "$stall_task" --poll-timeout 30 --stall-seconds 5
 code=$?
 set -e
 [ "$code" -eq 5 ] || fail "opencode: a stalled wait should exit 5, got $code: $res"
-echo "$res" | grep -q 'returned=stalled' || fail "opencode: stalled return is indistinguishable from a poll timeout: $res"
+grep -q <<<"$res" 'returned=stalled' || fail "opencode: stalled return is indistinguishable from a poll timeout: $res"
 
 # and it is return-only: the attempt is left running, never cancelled
 set +e
@@ -1253,7 +1356,7 @@ set +e
 res="$(run_delegate "$oc" wait "$stall_task" --poll-timeout 30 --stall-seconds 99999)"
 code=$?
 set -e
-echo "$res" | grep -q 'returned=provider_error' || fail "opencode: provider error did not end the wait: $res"
+grep -q <<<"$res" 'returned=provider_error' || fail "opencode: provider error did not end the wait: $res"
 run_delegate "$oc" cancel "$stall_task" >/dev/null 2>&1 || true
 
 # --- wait --any -------------------------------------------------------------
@@ -1278,8 +1381,8 @@ res="$(run_delegate "$oc" wait --any "$done_a" "$live_task" --poll-timeout 1)"
 code=$?
 set -e
 [ "$code" -eq 0 ] || fail "opencode: wait --any with a finished task should exit 0, got $code: $res"
-echo "$res" | grep -q "$done_a" || fail "opencode: wait --any table omits a task: $res"
-echo "$res" | grep -q "$live_task" || fail "opencode: wait --any table omits the running task: $res"
+grep -q <<<"$res" "$done_a" || fail "opencode: wait --any table omits a task: $res"
+grep -q <<<"$res" "$live_task" || fail "opencode: wait --any table omits the running task: $res"
 
 # all still running: exit 3
 set +e
@@ -1320,8 +1423,8 @@ git -C "$other_repo" init -q
 note_task="$(cd "$note_repo" && run_delegate "$oc" run --json "undecided task" | jq -r .task_id)"
 
 err="$(cd "$note_repo" && run_delegate "$oc" list 2>&1 >/dev/null)"
-echo "$err" | grep -q "$note_task" || fail "opencode: no note about the undecided Task in its own tree: $err"
-echo "$err" | grep -q '^NOTE: 1 Task' || fail "opencode: the note miscounts pending Tasks: $err"
+grep -q <<<"$err" "$note_task" || fail "opencode: no note about the undecided Task in its own tree: $err"
+grep -q <<<"$err" '^NOTE: 1 Task' || fail "opencode: the note miscounts pending Tasks: $err"
 
 # A backlog stays visible without dumping every Task id on each invocation.
 for n in 1 2 3 4 5 6; do
@@ -1330,8 +1433,8 @@ for n in 1 2 3 4 5 6; do
   jq --arg id "task_00000000-000000-$n" '.task_id = $id' "$(taskdir_of "$note_task")/task.json" >"$synthetic/task.json"
 done
 err="$(cd "$note_repo" && run_delegate "$oc" list 2>&1 >/dev/null)"
-echo "$err" | grep -q '^NOTE: 7 Task' || fail "opencode: backlog note miscounts Tasks: $err"
-echo "$err" | grep -q '+4 more; delegate.sh list --active' || fail "opencode: backlog note lacks the lookup command: $err"
+grep -q <<<"$err" '^NOTE: 7 Task' || fail "opencode: backlog note miscounts Tasks: $err"
+grep -q <<<"$err" '+4 more; delegate.sh list --active' || fail "opencode: backlog note lacks the lookup command: $err"
 [ "$(printf '%s' "$err" | wc -c)" -lt 250 ] || fail "opencode: backlog note prints too many Task ids: $err"
 for n in 1 2 3 4 5 6; do
   rm -r "$stub_dir/state/workflow-skills/subagents/task_00000000-000000-$n"
@@ -1342,7 +1445,7 @@ err="$(cd "$note_repo" && run_delegate "$oc" status "$note_task" 2>&1 >/dev/null
 
 # a different tree must not be nagged about it
 err="$(cd "$other_repo" && run_delegate "$oc" list 2>&1 >/dev/null)"
-echo "$err" | grep -q "$note_task" && fail "opencode: undecided Task leaked into another tree's note: $err"
+grep -q <<<"$err" "$note_task" && fail "opencode: undecided Task leaked into another tree's note: $err"
 
 # and a launch's --json stdout stays parseable while the note is printed
 out="$(cd "$note_repo" && run_delegate "$oc" run --json "another task" 2>/dev/null)"
@@ -1351,7 +1454,7 @@ echo "$out" | jq -e '.task_id' >/dev/null || fail "opencode: the note broke --js
 # once decided, it stops being mentioned
 run_delegate "$oc" decide "$note_task" accept --reason "done" >/dev/null
 err="$(cd "$note_repo" && run_delegate "$oc" list 2>&1 >/dev/null)"
-echo "$err" | grep -q "$note_task" && fail "opencode: a decided Task is still reported as pending: $err"
+grep -q <<<"$err" "$note_task" && fail "opencode: a decided Task is still reported as pending: $err"
 
 # --- report rendering -------------------------------------------------------
 
@@ -1361,14 +1464,14 @@ blocked_task="$(STUB_STATUS=BLOCKED run_delegate "$oc" run --json "blocking task
 set +e
 res="$(run_delegate "$oc" status "$blocked_task")"
 set -e
-echo "$res" | grep -q 'QUESTION: ' || fail "opencode: the worker's question is not rendered: $res"
+grep -q <<<"$res" 'QUESTION: ' || fail "opencode: the worker's question is not rendered: $res"
 run_delegate "$oc" decide "$blocked_task" accept --reason "fixture" >/dev/null
 
 # --full restores the report verbatim
 set +e
 res="$(run_delegate "$oc" status "$blocked_task" --full)"
 set -e
-echo "$res" | grep -q 'STATUS: BLOCKED' || fail "opencode: --full did not restore the raw report: $res"
+grep -q <<<"$res" 'STATUS: BLOCKED' || fail "opencode: --full did not restore the raw report: $res"
 
 # a fallback report is raw provider JSONL: a handful of lines, tens of
 # kilobytes. A line-count cap alone would print all of it.
@@ -1382,7 +1485,7 @@ res="$(run_delegate "$oc" status "$long_task")"
 set -e
 [ "$(printf '%s' "$res" | wc -c)" -lt 3000 ] \
   || fail "opencode: a single huge report line was not capped ($(printf '%s' "$res" | wc -c) bytes)"
-echo "$res" | grep -q 'truncated to the last 2000 characters' \
+grep -q <<<"$res" 'truncated to the last 2000 characters' \
   || fail "opencode: byte truncation is not announced: $res"
 set +e
 res="$(run_delegate "$oc" status "$long_task" --full)"
@@ -1403,8 +1506,8 @@ mkdir -p "$legacy_dir"
 echo "done 0" >"$legacy_dir/status"
 printf 'SESSION: ses_old\nEXIT: 0\n--- REPORT ---\nold job report\n' >"$legacy_dir/result.txt"
 res="$(run_delegate "$oc" status opencode-20200101-120000)"
-echo "$res" | grep -q '^LEGACY JOB:' || fail "opencode: legacy job not labelled: $res"
-echo "$res" | grep -q 'old job report' || fail "opencode: legacy job report lost: $res"
+grep -q <<<"$res" '^LEGACY JOB:' || fail "opencode: legacy job not labelled: $res"
+grep -q <<<"$res" 'old job report' || fail "opencode: legacy job report lost: $res"
 run_delegate "$oc" status opencode-20200101-120000 --json | jq -e '.legacy == true' >/dev/null \
   || fail "opencode: legacy job not flagged in JSON"
 run_delegate "$oc" list --json | jq -e 'map(select(.task_id == "opencode-20200101-120000")) | length == 0' >/dev/null \
@@ -1450,7 +1553,7 @@ run_delegate "$oc" policy --json | jq -e '.research_model == "stub/worker"' >/de
   || fail "opencode: research model does not fall back to the worker model"
 printf 'OPENCODE_SUBAGENT_MODEL=stub/worker\nOPENCODE_SUBAGENT_RESEARCH_MODEL=stub/research\n' >"$conf_file"
 out="$(run_delegate "$oc" policy)"
-echo "$out" | grep -q '^RESEARCH_MODEL: stub/research$' || fail "opencode: research model not reported: $out"
+grep -q <<<"$out" '^RESEARCH_MODEL: stub/research$' || fail "opencode: research model not reported: $out"
 rm -f "$stub_dir/opencode.args"
 out="$(STUB_SESSION=ses_research run_delegate "$oc" start --role researcher "survey the parser")"
 rtask="$(task_of "$out")"
@@ -1473,12 +1576,12 @@ code=$?
 bad="$(run_delegate "$oc" start --role editor "x" 2>&1)"
 bad_code=$?
 set -e
-[ "$code" -eq 2 ] && echo "$msg" | grep -q 'runs the researcher role' \
+[ "$code" -eq 2 ] && grep -q <<<"$msg" 'runs the researcher role' \
   || fail "opencode: retry switched roles ($code): $msg"
-[ "$bad_code" -eq 2 ] && echo "$bad" | grep -q 'invalid --role' || fail "opencode: unknown role accepted ($bad_code): $bad"
+[ "$bad_code" -eq 2 ] && grep -q <<<"$bad" 'invalid --role' || fail "opencode: unknown role accepted ($bad_code): $bad"
 # a researcher's findings are the deliverable: status shows its report whole
 out="$(run_delegate "$oc" status "$rtask")"
-echo "$out" | grep -q '^STATUS: DONE' || fail "opencode: researcher status hid the full report: $out"
+grep -q <<<"$out" '^STATUS: DONE' || fail "opencode: researcher status hid the full report: $out"
 run_delegate "$oc" decide "$rtask" accept --reason "researcher fixture" >/dev/null
 # the researcher's shell rules, replayed the way OpenCode 2.x applies them:
 # each command of a compound line on its own, last matching rule wins
@@ -1532,7 +1635,7 @@ set +e
 msg="$(run_delegate "$oc" start --resume ses_research --role worker "edit it" 2>&1)"
 code=$?
 set -e
-[ "$code" -eq 2 ] && echo "$msg" | grep -q 'ran the researcher role' \
+[ "$code" -eq 2 ] && grep -q <<<"$msg" 'ran the researcher role' \
   || fail "opencode: start --resume switched a session's role ($code): $msg"
 # --save-default with --role researcher sets the researcher model, not the worker's
 stask="$(task_of "$(run_delegate "$oc" start --role researcher --model stub/saved-research --save-default "x")")"

@@ -76,51 +76,106 @@ process_identity_alive() {
 # Replace a file in one step. Refuses to install an empty payload so a failed
 # producer (jq erroring mid-pipeline) cannot truncate live state.
 write_atomic() {
-  local dest="$1" tmp="$1.tmp.$$"
+  local dest="$1" tmp="$1.tmp.${BASHPID:-$$}"
   cat >"$tmp"
   if [ ! -s "$tmp" ]; then rm -f "$tmp"; return 1; fi
   mv -f "$tmp" "$dest"
 }
 
-# Coarse per-task mutex. mkdir is atomic on every filesystem we care about. The
-# owner PID is published immediately, followed by a boot/process-start
+# Coarse per-task mutex. The lock is <taskdir>/.lock/owner.pid, created with
+# O_EXCL by bash's noclobber redirection. The directory is only a container:
+# creating it proves nothing, because uutils mkdir (the default coreutils on
+# Ubuntu 26.04) reports success when it races another mkdir of the same path.
+# The owner PID is published immediately, followed by a boot/process-start
 # fingerprint. A lock is reaped only when that owner is no longer the same live
 # process; elapsed wall time alone never breaks a lock with a published owner.
-lock_acquire() {
-  local dir="$1/.lock" owner age self="${BASHPID:-$$}"
+
+# lock_instance DIR — what identifies one holder's lock: its PID and token.
+# Tokens are unique per acquisition, so a changed value means a new holder.
+lock_instance() {
+  printf '%s|%s\n' "$(cat "$1/owner.pid" 2>/dev/null || true)" "$(cat "$1/owner.token" 2>/dev/null || true)"
+}
+
+# lock_stale DIR — 0 when the holder is provably gone: its PID is dead, or the
+# PID was reused by another process, or it claimed owner.pid and never wrote
+# its PID in 30s (killed between the create and the write). No owner.pid means
+# no lock at all, which is never stale.
+lock_stale() {
+  local dir="$1" owner age
+  [ -f "$dir/owner.pid" ] || return 1
+  owner="$(cat "$dir/owner.pid" 2>/dev/null || true)"
+  if [ -n "$owner" ]; then
+    kill -0 "$owner" 2>/dev/null || return 0
+    if [ -f "$dir/process.json" ] && ! process_identity_alive "$dir/process.json" "$owner"; then return 0; fi
+    return 1
+  fi
+  age="$(file_age_seconds "$dir/owner.pid")"
+  [ "$age" != "null" ] && [ "$age" -ge 30 ]
+}
+
+# lock_clear DIR — drop a lock's files with owner.pid last, so no claimer can
+# get in while the old owner's token or fingerprint is still on disk.
+lock_clear() {
+  rm -f "$1/owner.token" "$1/process.json"
+  rm -f "$1/owner.pid"
+  rmdir "$1" 2>/dev/null || true
+}
+
+# lock_try_reap DIR — remove a stale lock without ever removing a live one.
+# Judging staleness and removing the lock are two steps. Between them the
+# observed holder can release, and a new holder can claim owner.pid at the same
+# path; removing then would break the new holder's lock and let two processes
+# in. So reapers serialize on a guard file (O_EXCL, like the lock) and remove
+# only when the instance read before and after the staleness check is the
+# same. A dead holder cannot release, other reapers are excluded, and nobody
+# can claim while owner.pid exists, so an unchanged stale instance stays put
+# until lock_clear. A guard left by a reaper killed mid-reap (it holds the
+# guard for milliseconds) expires after 10 seconds.
+lock_try_reap() {
+  local dir="$1" guard="$1.reap" before age rc=1
+  if ! ( set -C; : >"$guard" ) 2>/dev/null; then
+    age="$(file_age_seconds "$guard")"
+    if [ "$age" != "null" ] && [ "$age" -ge 10 ]; then rm -rf "$guard" 2>/dev/null || true; fi
+    return 1
+  fi
+  before="$(lock_instance "$dir")"
+  if lock_stale "$dir" && [ "$(lock_instance "$dir")" = "$before" ]; then
+    lock_clear "$dir"
+    rc=0
+  fi
+  rm -f "$guard"
+  return "$rc"
+}
+
+# lock_try_acquire TASKDIR — one non-blocking attempt; 1 when another holder
+# has the lock. The O_EXCL create of owner.pid is the whole mutual exclusion.
+lock_try_acquire() {
+  local dir="$1/.lock" self="${BASHPID:-$$}"
   if [ -n "$lock_held" ]; then
     [ "$lock_held" = "$dir" ] || { echo "BUG: attempted to nest locks for different Tasks" >&2; return 1; }
     return 0
   fi
-  while ! mkdir "$dir" 2>/dev/null; do
-    owner="$(cat "$dir/owner.pid" 2>/dev/null || true)"
-    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
-      if [ -f "$dir/process.json" ] && ! process_identity_alive "$dir/process.json" "$owner"; then
-        rm -rf "$dir" 2>/dev/null || true
-        continue
-      fi
-      sleep 0.1
-      continue
-    fi
-    age="$(file_age_seconds "$dir")"
-    if [ -n "$owner" ] || { [ "$age" != "null" ] && [ "$age" -ge 30 ]; }; then
-      rm -rf "$dir" 2>/dev/null || true
-      continue
-    fi
-    sleep 0.1
-  done
+  mkdir "$dir" 2>/dev/null || true
+  ( set -C; printf '%s\n' "$self" >"$dir/owner.pid" ) 2>/dev/null || return 1
   lock_token="$self-$(now_epoch)-$RANDOM"
-  printf '%s\n' "$self" >"$dir/owner.pid"
   printf '%s\n' "$lock_token" >"$dir/owner.token"
   persist_process_identity "$dir/process.json" "$self"
   lock_held="$dir"
 }
 
+lock_acquire() {
+  local dir="$1/.lock"
+  until lock_try_acquire "$1"; do
+    [ -z "$lock_held" ] || return 1
+    if lock_stale "$dir" && lock_try_reap "$dir"; then continue; fi
+    sleep 0.1
+  done
+}
+
 lock_release() {
   local held="$lock_held"
   if [ -n "$held" ] && [ "$(cat "$held/owner.token" 2>/dev/null || true)" = "$lock_token" ]; then
-    rm -f "$held/owner.pid" "$held/owner.token" "$held/process.json"
-    rmdir "$held" 2>/dev/null || true
+    lock_clear "$held"
   fi
   lock_held=""
   lock_token=""
