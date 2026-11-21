@@ -23,7 +23,9 @@
 #   delegate.sh events TASK
 #   delegate.sh logs TASK [ATTEMPT] [--stream report|request|raw|stderr|progress|result|meta|changed]
 #   delegate.sh recover [--reports-only]        reconcile crashes and restore saved final reports
-#   delegate.sh policy [off|explicit|auto]
+#   delegate.sh policy [off|explicit|auto] [--repo]
+#   delegate.sh config [--json]                 effective config for this cwd + where it came from
+#   delegate.sh config --repo unset KEY         drop a key from the repo config
 #   delegate.sh help                            this text
 #
 # Routing native delegation (see scripts/routing.py):
@@ -43,6 +45,8 @@
 #   --stall-seconds SECS     provider silence that ends a wait early (default 300)
 #   --no-stall-return        block for the full poll timeout even if it looks stalled
 #   --save-default           persist --model as the configured worker model
+#   --repo                   write the repo config (<repo>/.workflow-skills/subagents.conf)
+#                            instead of the global one
 #   --full                   print the worker report in full, untruncated
 #   --reports-only           recover saved final reports without crash reconciliation
 #   --json                   machine-readable output
@@ -69,6 +73,11 @@ default_retention_days=90
 default_raw_retention_days=7
 state_root="${XDG_STATE_HOME:-$HOME/.local/state}/workflow-skills/subagents"
 conf_file="${XDG_CONFIG_HOME:-$HOME/.config}/workflow-skills/subagents.conf"
+# Per-repo config: the nearest <dir>/.workflow-skills/subagents.conf between the
+# Task's tree and its worktree root (see config_cwd / repo_conf_lookup).
+repo_conf_rel=".workflow-skills/subagents.conf"
+readonly_key="OPENCODE_SUBAGENT_READONLY_AGENTS"
+default_readonly_agents="*-reviewer *-explorer"
 # Resolve our own path through symlinks: the script is reachable as
 # ~/.local/bin/opencode-delegate and as a symlinked skills directory, and
 # dirname of the *invocation* path would look for orchestration.sh next to the
@@ -98,6 +107,9 @@ poll_interval="${DELEGATE_POLL_INTERVAL:-5}"
 stall_threshold="${DELEGATE_STALL_THRESHOLD:-}"
 stall_key="OPENCODE_SUBAGENT_STALL_SECONDS"
 default_stall_seconds=300
+# What --stall-seconds/the env asked for, kept before the conf fills it in, so
+# `config` can report a flag's value as such.
+stall_cli=""
 no_stall_return=0
 wait_any=0
 report_full=0
@@ -116,6 +128,12 @@ skip_decision=0
 task_id=""
 task_dir=""
 positionals=()
+# Repo config: --repo writes the repo file instead of the global one.
+repo_write=0
+repo_conf_file=""
+repo_conf_resolved=0
+repo_conf_dir=""
+_config_cwd=""
 
 # Native delegation routing (hooks and supervisors) never touches Tasks, the
 # worker model or OpenCode: dispatch before any of that is parsed or prepared.
@@ -149,7 +167,7 @@ die() { echo "ERROR: $1" >&2; exit "${2:-2}"; }
 
 op=""
 case "${1:-}" in
-  start|run|retry|resume|status|wait|cancel|verify|decide|list|show|attempts|events|logs|recover|policy)
+  start|run|retry|resume|status|wait|cancel|verify|decide|list|show|attempts|events|logs|recover|policy|config)
     op="$1"; shift ;;
   help) usage; exit 0 ;;
 esac
@@ -166,6 +184,7 @@ while [ "$#" -gt 0 ]; do
     --stream)       shift; stream="${1:?--stream requires a name}" ;;
     --timeout)      shift; hard_timeout="${1:?--timeout requires seconds}" ;;
     --save-default) save_default=1 ;;
+    --repo)         repo_write=1 ;;
     --wait)         shift; wait_job="${1:?--wait requires a task id}" ;;
     --poll-timeout) shift; poll_timeout="${1:?--poll-timeout requires seconds}" ;;
     --stall-seconds) shift; stall_threshold="${1:?--stall-seconds requires seconds}" ;;
@@ -189,18 +208,146 @@ done
 
 # ---------------------------------------------------------------- configuration
 
-conf_get() {
-  [ -f "$conf_file" ] || return 0
-  sed -n "s/^$1=//p" "$conf_file" | tail -1
+# The directory whose repo config applies: the Task's tree when it is known
+# (--cwd, or the Task's own cwd for retry/resume), else the caller's.
+config_cwd() {
+  local d
+  if [ -n "$_config_cwd" ]; then printf '%s\n' "$_config_cwd"; return 0; fi
+  d="$cwd"
+  if [ -z "$d" ] && [ -n "$task_dir" ] && [ -f "$task_dir/task.json" ]; then
+    d="$(json_read "$task_dir/task.json" '.cwd // ""')"
+    [ "$d" != "null" ] || d=""
+  fi
+  if [ -z "$d" ]; then
+    # The caller's directory is only a placeholder until a Task is resolved
+    # (retry runs from anywhere but must read the Task's repo config).
+    ( cd "$PWD" && pwd -P ) 2>/dev/null || printf '%s\n' "$PWD"
+    return 0
+  fi
+  _config_cwd="$(cd "$d" 2>/dev/null && pwd -P)" || _config_cwd="$d"
+  printf '%s\n' "$_config_cwd"
 }
 
-conf_set() {
-  mkdir -p "$(dirname "$conf_file")"
+# Walk up from DIR to TOP inclusive: the nearest config file wins.
+walk_up_conf() {
+  local d="$1" top="$2"
+  while :; do
+    if [ -f "$d/$repo_conf_rel" ]; then printf '%s\n' "$d/$repo_conf_rel"; return 0; fi
+    [ "$d" != "$top" ] || return 1
+    d="$(dirname "$d")"
+    case "$d" in "$top"|"$top"/*) ;; *) return 1 ;; esac
+  done
+}
+
+# The repo config that applies to DIR, or nothing when DIR is not inside a work
+# tree. A linked worktree with no file of its own falls back to the main
+# worktree's, at the same path relative to the root.
+repo_conf_lookup() {
+  local dir top git_dir common main_top rel start found
+  dir="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
+  top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  if found="$(walk_up_conf "$dir" "$top")"; then printf '%s\n' "$found"; return 0; fi
+
+  git_dir="$(git -C "$dir" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  common="$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null || true)"
+  [ -n "$git_dir" ] && [ -n "$common" ] || return 0
+  case "$common" in
+    /*) ;;
+    *) common="$dir/$common" ;;
+  esac
+  common="$(cd "$common" 2>/dev/null && pwd -P)" || return 0
+  [ "$common" != "$git_dir" ] || return 0
+  main_top="$(dirname "$common")"
+  rel="${dir#"$top"}"
+  start="$main_top$rel"
+  [ -d "$start" ] || start="$main_top"
+  walk_up_conf "$start" "$main_top" || true
+}
+
+# Cached per lookup directory: ops resolve the stall threshold before retry and
+# resume load the Task's cwd, and that earlier lookup must not stick.
+repo_conf() {
+  local dir
+  dir="$(config_cwd)"
+  if [ "$repo_conf_resolved" -eq 0 ] || [ "$dir" != "$repo_conf_dir" ]; then
+    repo_conf_file="$(repo_conf_lookup "$dir")"
+    repo_conf_dir="$dir"
+    repo_conf_resolved=1
+  fi
+  [ -z "$repo_conf_file" ] || printf '%s\n' "$repo_conf_file"
+  return 0
+}
+
+# The keys a repo file may override. Retention is global only: the state store is.
+conf_overridable() {
+  case "$1" in
+    "$policy_key"|"$model_key"|"$research_model_key"|"$readonly_key"|"$stall_key") return 0 ;;
+  esac
+  return 1
+}
+
+# The file that supplies KEY: the repo config for overridable keys, then the
+# global config, else nothing. Presence is what counts, so a key set to an empty
+# value in a repo file still overrides the global one.
+conf_get_from() {
+  local file
+  if conf_overridable "$1"; then
+    file="$(repo_conf)"
+    if [ -n "$file" ] && grep -q "^$1=" "$file"; then printf '%s\n' "$file"; return 0; fi
+  fi
+  if [ -f "$conf_file" ] && grep -q "^$1=" "$conf_file"; then printf '%s\n' "$conf_file"; fi
+  return 0
+}
+
+conf_get() {
+  local file
+  file="$(conf_get_from "$1")"
+  [ -n "$file" ] || return 0
+  sed -n "s/^$1=//p" "$file" | tail -1
+}
+
+conf_set_in() {
+  local file="$1" key="$2"
+  mkdir -p "$(dirname "$file")"
   {
-    if [ -f "$conf_file" ]; then grep -v "^$1=" "$conf_file" || true; fi
-    echo "$1=$2"
-  } >"$conf_file.tmp"
-  mv "$conf_file.tmp" "$conf_file"
+    if [ -f "$file" ]; then grep -v "^$key=" "$file" || true; fi
+    echo "$key=$3"
+  } >"$file.tmp"
+  mv "$file.tmp" "$file"
+}
+
+conf_set() { conf_set_in "$conf_file" "$1" "$2"; }
+
+# Writes go to the nearest existing repo file, else this worktree's root. The
+# directory ignores itself, so --repo never dirties the tree.
+repo_conf_target() {
+  local existing top
+  existing="$(repo_conf)"
+  [ -z "$existing" ] || { printf '%s\n' "$existing"; return 0; }
+  top="$(git -C "$(config_cwd)" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  printf '%s\n' "$top/$repo_conf_rel"
+}
+
+repo_conf_set() {
+  local target dir
+  target="$(repo_conf_target)" \
+    || die "--repo needs a git work tree: $(config_cwd) is not inside one"
+  dir="$(dirname "$target")"
+  if [ ! -d "$dir" ]; then
+    mkdir -p "$dir"
+    printf '*\n' >"$dir/.gitignore"
+  fi
+  conf_set_in "$target" "$1" "$2"
+  repo_conf_resolved=0
+}
+
+repo_conf_unset() {
+  local target
+  target="$(repo_conf)"
+  [ -n "$target" ] || return 0
+  { grep -v "^$1=" "$target" || true; } >"$target.tmp"
+  mv "$target.tmp" "$target"
+  repo_conf_resolved=0
 }
 
 conf_number() {
@@ -221,12 +368,15 @@ resolve_stall_threshold() {
 }
 
 resolve_policy() {
-  local value
+  local value source
   value="$(conf_get "$policy_key")"
   value="${value:-$default_policy}"
   case "$value" in
     off|explicit|auto) echo "$value" ;;
-    *) die "invalid $policy_key in $conf_file: $value (want off|explicit|auto)" ;;
+    *)
+      source="$(conf_get_from "$policy_key")"
+      die "invalid $policy_key in ${source:-$conf_file}: $value (want off|explicit|auto)"
+      ;;
   esac
 }
 
@@ -1019,7 +1169,8 @@ do_policy() {
   local requested="${positionals[0]:-}"
   if [ -n "$requested" ]; then
     case "$requested" in
-      off|explicit|auto) conf_set "$policy_key" "$requested" ;;
+      off|explicit|auto)
+        if [ "$repo_write" -eq 1 ]; then repo_conf_set "$policy_key" "$requested"; else conf_set "$policy_key" "$requested"; fi ;;
       *) die "invalid policy: $requested (want off|explicit|auto)" ;;
     esac
   fi
@@ -1046,6 +1197,100 @@ do_policy() {
   fi
 }
 
+# "value<US>source" for one key (<US> = unit separator, so an empty value keeps
+# its position). Source is the file that set it, "default" when FALLBACK
+# applies, empty when nothing is set and there is no fallback.
+config_entry() {
+  local key="$1" fallback="${2-}" file value
+  file="$(conf_get_from "$key")"
+  if [ -n "$file" ]; then
+    value="$(sed -n "s/^$key=//p" "$file" | tail -1)"
+    printf '%s\x1f%s\n' "$value" "$file"
+  elif [ -n "$fallback" ]; then
+    printf '%s\x1fdefault\n' "$fallback"
+  else
+    printf '\x1f\n'
+  fi
+}
+
+# The effective config for this cwd and where each value came from. A retention
+# key or an unknown key in a repo file is warned about and ignored.
+do_config() {
+  local repo line key warnings=() warnings_json='[]' out_json w
+  local policy policy_src
+  local model_value model_src research_value research_src
+  local readonly_value readonly_src stall_value stall_src
+  local retention_value retention_src raw_value raw_src
+
+  repo="$(repo_conf)"
+  if [ "${positionals[0]:-}" = "unset" ]; then
+    [ "$repo_write" -eq 1 ] \
+      || die "removing a key is a repo operation: delegate.sh config --repo unset KEY"
+    [ -n "${positionals[1]:-}" ] || die "config --repo unset requires a key"
+    repo_conf_unset "${positionals[1]}"
+    return 0
+  fi
+  [ "$repo_write" -eq 0 ] \
+    || die "--repo with config means: delegate.sh config --repo unset KEY"
+
+  # An invalid policy in a repo file is a hard error, as in the global file.
+  policy="$(resolve_policy)"
+  policy_src="$(conf_get_from "$policy_key")"
+
+  if [ -n "$model" ]; then model_value="$model"; model_src="flag"; else
+    IFS=$'\x1f' read -r model_value model_src <<<"$(config_entry "$model_key")"
+  fi
+  IFS=$'\x1f' read -r research_value research_src <<<"$(config_entry "$research_model_key")"
+  IFS=$'\x1f' read -r readonly_value readonly_src <<<"$(config_entry "$readonly_key" "$default_readonly_agents")"
+  if [ -n "$stall_cli" ]; then stall_value="$stall_cli"; stall_src="flag"; else
+    IFS=$'\x1f' read -r stall_value stall_src <<<"$(config_entry "$stall_key" "$default_stall_seconds")"
+  fi
+  IFS=$'\x1f' read -r retention_value retention_src <<<"$(config_entry "$retention_key" "$default_retention_days")"
+  IFS=$'\x1f' read -r raw_value raw_src <<<"$(config_entry "$raw_retention_key" "$default_raw_retention_days")"
+
+  if [ -n "$repo" ]; then
+    while IFS= read -r line; do
+      case "$line" in ''|'#'*) continue ;; *=*) ;; *) continue ;; esac
+      key="${line%%=*}"
+      case "$key" in
+        "$policy_key"|"$model_key"|"$research_model_key"|"$readonly_key"|"$stall_key") ;;
+        "$retention_key"|"$raw_retention_key")
+          warnings+=("WARNING: $repo: $key is global only; ignored") ;;
+        *) warnings+=("WARNING: $repo: unknown key $key; ignored") ;;
+      esac
+    done <"$repo"
+  fi
+  [ "${#warnings[@]}" -eq 0 ] || warnings_json="$(printf '%s\n' "${warnings[@]}" | jq -R . | jq -s .)"
+
+  out_json="$(jq -n \
+    --arg pk "$policy_key" --arg pv "$policy" --arg ps "${policy_src:-default}" \
+    --arg mk "$model_key" --arg mv "$model_value" --arg ms "$model_src" \
+    --arg rk "$research_model_key" --arg rv "$research_value" --arg rs "$research_src" \
+    --arg ok "$readonly_key" --arg ov "$readonly_value" --arg os "${readonly_src:-default}" \
+    --arg sk "$stall_key" --arg sv "$stall_value" --arg ss "${stall_src:-default}" \
+    --arg tk "$retention_key" --arg tv "$retention_value" --arg ts "${retention_src:-default}" \
+    --arg wk "$raw_retention_key" --arg wv "$raw_value" --arg ws "${raw_src:-default}" \
+    --argjson warnings "$warnings_json" \
+    '{($pk): {value: $pv, source: $ps},
+      ($mk): {value: (if $ms == "" then null else $mv end),
+              source: (if $ms == "" then "default" else $ms end)},
+      ($rk): {value: (if $rs == "" then null else $rv end),
+              source: (if $rs == "" then "default" else $rs end)},
+      ($ok): {value: $ov, source: $os},
+      ($sk): {value: $sv, source: $ss},
+      ($tk): {value: $tv, source: $ts},
+      ($wk): {value: $wv, source: $ws},
+      warnings: $warnings}')"
+
+  if [ "$json_out" -eq 1 ]; then
+    printf '%s\n' "$out_json"
+  else
+    printf '%s\n' "$out_json" \
+      | jq -r 'del(.warnings) | to_entries[] | "\(.key)=\(.value.value // "")  # \(.value.source)"'
+  fi
+  for w in ${warnings[@]+"${warnings[@]}"}; do printf '%s\n' "$w" >&2; done
+}
+
 # ---------------------------------------------------------------------- launch
 
 preflight() {
@@ -1056,12 +1301,17 @@ preflight() {
   require_supported_opencode
   if [ "$save_default" -eq 1 ]; then
     [ -n "$model" ] || die "--save-default requires --model"
-    if [ "$role" = "researcher" ]; then conf_set "$research_model_key" "$model"; else conf_set "$model_key" "$model"; fi
+    if [ "$repo_write" -eq 1 ]; then
+      if [ "$role" = "researcher" ]; then repo_conf_set "$research_model_key" "$model"; else repo_conf_set "$model_key" "$model"; fi
+    elif [ "$role" = "researcher" ]; then conf_set "$research_model_key" "$model"
+    else conf_set "$model_key" "$model"
+    fi
   fi
-  local policy
+  local policy policy_source
   policy="$(resolve_policy)"
+  policy_source="$(conf_get_from "$policy_key")"
   [ "$policy" != "off" ] \
-    || die "OpenCode is disabled ($policy_key=off in $conf_file); native subagents are unaffected. Enable OpenCode with: delegate.sh policy explicit"
+    || die "OpenCode is disabled ($policy_key=off in ${policy_source:-$conf_file}); native subagents are unaffected. Enable OpenCode with: delegate.sh policy explicit"
   resolve_model
   ensure_agent
   mkdir -p "$state_root"
@@ -1676,7 +1926,9 @@ case "$op" in
   start|run) spec="${positionals[0]:-}" ;;
 esac
 
-# One resolved value for every op, so `wait` and the liveness JSON agree.
+# One resolved value for every op, so `wait` and the liveness JSON agree. What
+# the flag/env said is kept first: `config` reports such a value as a flag's.
+stall_cli="$stall_threshold"
 resolve_stall_threshold
 
 case "$op" in
@@ -1696,5 +1948,6 @@ case "$op" in
   logs)     do_logs ;;
   recover)  do_recover ;;
   policy)   do_policy ;;
+  config)   do_config ;;
   *)        die "unknown operation: $op" ;;
 esac
