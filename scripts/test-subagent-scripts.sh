@@ -1704,6 +1704,15 @@ echo "$cfg" | jq -e --arg f "$cfg_repo/sub/.workflow-skills/subagents.conf" \
   || fail "opencode: a subdirectory repo config did not win: $cfg"
 rm -rf "$cfg_repo/sub/.workflow-skills"
 
+# a repo file overrides the read-only patterns and the stall threshold too
+printf 'OPENCODE_SUBAGENT_DELEGATION_POLICY=auto\nOPENCODE_SUBAGENT_READONLY_AGENTS=repo-reader\nOPENCODE_SUBAGENT_STALL_SECONDS=222\n' >"$cfg_file"
+cfg="$(cd "$cfg_repo" && run_delegate "$oc" config --json)"
+echo "$cfg" | jq -e --arg f "$cfg_file" \
+  '.OPENCODE_SUBAGENT_READONLY_AGENTS == {value: "repo-reader", source: $f}
+   and .OPENCODE_SUBAGENT_STALL_SECONDS == {value: "222", source: $f}' >/dev/null \
+  || fail "opencode: repo read-only/stall overrides did not win: $cfg"
+printf 'OPENCODE_SUBAGENT_DELEGATION_POLICY=auto\nOPENCODE_SUBAGENT_MODEL=repo/model\nOPENCODE_SUBAGENT_RESEARCH_MODEL=repo/research\n' >"$cfg_file"
+
 # retention is global only, and a key no layer knows is inert: both warn
 printf 'OPENCODE_SUBAGENT_DELEGATION_POLICY=auto\nOPENCODE_SUBAGENT_RETENTION_DAYS=3\nNOT_A_KEY=1\n' >"$cfg_file"
 err="$(cd "$cfg_repo" && run_delegate "$oc" config 2>&1 >/dev/null)"
@@ -1756,6 +1765,22 @@ echo "$cfg" | jq -e --arg f "$stub_dir/wt-linked/.workflow-skills/subagents.conf
   '.OPENCODE_SUBAGENT_DELEGATION_POLICY == {value: "explicit", source: $f}' >/dev/null \
   || fail "opencode: the worktree's own config did not win: $cfg"
 
+# A write from a linked worktree lands in that worktree, never in the main
+# worktree's file it only reads as a fallback.
+lw_main="$stub_dir/lw-main"
+mkdir -p "$lw_main/.workflow-skills"
+git -C "$lw_main" init -q
+git -C "$lw_main" -c user.name=t -c user.email=t@t commit --allow-empty -q -m init
+printf 'OPENCODE_SUBAGENT_DELEGATION_POLICY=off\n' >"$lw_main/.workflow-skills/subagents.conf"
+git -C "$lw_main" worktree add -q "$stub_dir/lw-linked" -b lw-linked
+( cd "$stub_dir/lw-linked" && run_delegate "$oc" policy auto --repo ) >/dev/null
+grep -qx 'OPENCODE_SUBAGENT_DELEGATION_POLICY=auto' "$stub_dir/lw-linked/.workflow-skills/subagents.conf" \
+  || fail "opencode: --repo from a linked worktree did not write its own file"
+grep -qx 'OPENCODE_SUBAGENT_DELEGATION_POLICY=off' "$lw_main/.workflow-skills/subagents.conf" \
+  || fail "opencode: --repo from a linked worktree rewrote the main worktree's file"
+[ -z "$(git -C "$stub_dir/lw-linked" status --porcelain)" ] \
+  || fail "opencode: --repo in a linked worktree dirtied it: $(git -C "$stub_dir/lw-linked" status --porcelain)"
+
 # --repo writes the repo config, creating a directory that ignores itself
 rw_repo="$stub_dir/repo-write"
 mkdir -p "$rw_repo"
@@ -1771,6 +1796,17 @@ grep -qxF '*' "$rw_repo/.workflow-skills/.gitignore" \
 (cd "$rw_repo" && run_delegate "$oc" policy) >"$stub_dir/rw-policy.out" 2>&1
 grep -q '^DELEGATION_POLICY: auto$' "$stub_dir/rw-policy.out" \
   || fail "opencode: policy --repo was not read back: $(cat "$stub_dir/rw-policy.out")"
+
+# an existing .workflow-skills/ without .gitignore still gets one, so --repo
+# never dirties the tree
+ig_repo="$stub_dir/repo-ignore"
+mkdir -p "$ig_repo/.workflow-skills"
+git -C "$ig_repo" init -q
+( cd "$ig_repo" && run_delegate "$oc" policy auto --repo ) >/dev/null
+grep -qxF '*' "$ig_repo/.workflow-skills/.gitignore" \
+  || fail "opencode: --repo did not add .gitignore to an existing directory"
+[ -z "$(git -C "$ig_repo" status --porcelain)" ] \
+  || fail "opencode: --repo dirtied a tree whose config directory already existed: $(git -C "$ig_repo" status --porcelain)"
 
 # --save-default --repo writes the model there, not to the global file
 cp "$conf_file" "$stub_dir/global-before-repo-save.conf"
@@ -1797,6 +1833,35 @@ set -e
 [ "$code" -eq 2 ] || fail "opencode: --repo outside a work tree should exit 2, got $code"
 grep -q 'git work tree' <<<"$msg" || fail "opencode: --repo outside a work tree lacks an actionable error: $msg"
 [ "$code2" -eq 2 ] || fail "opencode: config --repo without unset KEY should exit 2, got $code2"
+
+# A researcher with no model of its own reports the worker's model and source.
+printf 'OPENCODE_SUBAGENT_MODEL=only/worker\n' >"$conf_file"
+cfg="$(cd "$stub_dir" && run_delegate "$oc" config --json)"
+echo "$cfg" | jq -e --arg f "$conf_file" \
+  '.OPENCODE_SUBAGENT_MODEL == {value: "only/worker", source: $f}
+   and .OPENCODE_SUBAGENT_RESEARCH_MODEL == {value: "only/worker", source: $f}' >/dev/null \
+  || fail "opencode: an unset research model did not report the worker model: $cfg"
+# a model no layer sets is null with source "unset", not "default"
+: >"$conf_file"
+cfg="$(cd "$stub_dir" && run_delegate "$oc" config --json)"
+echo "$cfg" | jq -e '.OPENCODE_SUBAGENT_MODEL == {value: null, source: "unset"}
+                      and .OPENCODE_SUBAGENT_RESEARCH_MODEL == {value: null, source: "unset"}' >/dev/null \
+  || fail "opencode: unset models were not reported as unset: $cfg"
+
+# A Task's own repo decides its stall threshold, not the caller's: a status read
+# from another directory must show A's value.
+stall_repo="$stub_dir/repo-stall"
+mkdir -p "$stall_repo/.workflow-skills"
+git -C "$stall_repo" init -q
+printf 'OPENCODE_SUBAGENT_STALL_SECONDS=222\n' >"$stall_repo/.workflow-skills/subagents.conf"
+stall_task="$(cd "$stall_repo" && run_delegate "$oc" start --json --model stub/model "stall task" | jq -r .task_id)"
+run_delegate "$oc" wait "$stall_task" --poll-timeout 30 >/dev/null
+thr="$(cd "$stub_dir" && run_delegate "$oc" status --json "$stall_task" | jq -r .stall_threshold_seconds)"
+[ "$thr" = "222" ] \
+  || fail "opencode: a status from another directory used the caller's stall threshold: $thr"
+thr="$(cd "$stub_dir" && run_delegate "$oc" wait --json "$stall_task" --poll-timeout 5 | jq -r .stall_threshold_seconds)"
+[ "$thr" = "222" ] \
+  || fail "opencode: a wait from another directory used the caller's stall threshold: $thr"
 
 # A retry runs from anywhere, but the Task's own tree decides its repo config.
 retry_repo="$stub_dir/repo-retry"

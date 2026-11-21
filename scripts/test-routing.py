@@ -218,9 +218,10 @@ class RepoConfig(Env):
         self.assertEqual(out.returncode, 0, out.stderr)
         sh = json.loads(out.stdout)
         self.assertEqual(routing.read_policy(cwd), sh[routing.POLICY_KEY]["value"])
-        readonly, _ = routing.conf_effective(routing.READONLY_KEY, cwd)
+        readonly, source = routing.conf_effective(routing.READONLY_KEY, cwd)
         self.assertEqual(readonly if readonly is not None else routing.DEFAULT_READONLY_AGENTS,
                          sh[routing.READONLY_KEY]["value"])
+        self.assertEqual(source or "default", sh[routing.READONLY_KEY]["source"])
         self.assertEqual(routing.readonly_agents(cwd)[:len(routing.BUILTIN_READONLY_AGENTS)],
                          list(routing.BUILTIN_READONLY_AGENTS))
         return sh
@@ -233,6 +234,26 @@ class RepoConfig(Env):
         # a key the repo file leaves alone still comes from the global file
         self.assertEqual(sh[routing.READONLY_KEY]["value"], "x-*")
         self.assertEqual(routing.readonly_agents(root)[-1], "x-*")
+
+    def test_the_repo_readonly_patterns_report_value_and_source(self):
+        self.global_conf(f"{routing.POLICY_KEY}=auto\n{routing.READONLY_KEY}=global-reader\n")
+        root = self.make_repo("repo", {self.CONF: f"{routing.READONLY_KEY}=repo-*, scout\n"})
+        sh = self.parity(root)
+        self.assertEqual(sh[routing.READONLY_KEY], {"value": "repo-*, scout", "source": self.conf_path(root)})
+        value, source = routing.conf_effective(routing.READONLY_KEY, root)
+        self.assertEqual((value, source), ("repo-*, scout", self.conf_path(root)))
+        self.assertEqual(routing.readonly_agents(root)[-2:], ["repo-*", "scout"])
+
+    def test_the_repo_readonly_patterns_are_read_per_hook_cwd(self):
+        # One session, two repositories: the same agent type is exempt in A and
+        # routed in B, decided from the tool call's cwd.
+        self.global_conf(f"{routing.POLICY_KEY}=auto\n")
+        a = self.make_repo("repo a", {self.CONF: f"{routing.READONLY_KEY}=scout\n"})
+        b = self.make_repo("repo b", {self.CONF: f"{routing.READONLY_KEY}=\n"})
+        self.prompt("anything at all here")
+        tool_input = {"prompt": "look", "subagent_type": "scout"}
+        self.assertIsNone(self.call(cwd=a, tool_input=tool_input))
+        self.assertEqual(self.decision(self.call(cwd=b, tool_input=tool_input)), "deny")
 
     def test_an_empty_repo_value_still_overrides(self):
         self.global_conf(f"{routing.POLICY_KEY}=auto\n")

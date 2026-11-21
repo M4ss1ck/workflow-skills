@@ -318,13 +318,14 @@ conf_set_in() {
 
 conf_set() { conf_set_in "$conf_file" "$1" "$2"; }
 
-# Writes go to the nearest existing repo file, else this worktree's root. The
-# directory ignores itself, so --repo never dirties the tree.
+# Writes go to the nearest repo file between this config's cwd and the current
+# worktree root, else that root. Reads keep the linked-worktree fallback, so a
+# write never lands in another worktree's file.
 repo_conf_target() {
-  local existing top
-  existing="$(repo_conf)"
-  [ -z "$existing" ] || { printf '%s\n' "$existing"; return 0; }
-  top="$(git -C "$(config_cwd)" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  local dir top
+  dir="$(config_cwd)"
+  top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  if walk_up_conf "$dir" "$top"; then return 0; fi
   printf '%s\n' "$top/$repo_conf_rel"
 }
 
@@ -333,18 +334,16 @@ repo_conf_set() {
   target="$(repo_conf_target)" \
     || die "--repo needs a git work tree: $(config_cwd) is not inside one"
   dir="$(dirname "$target")"
-  if [ ! -d "$dir" ]; then
-    mkdir -p "$dir"
-    printf '*\n' >"$dir/.gitignore"
-  fi
+  mkdir -p "$dir"
+  [ -f "$dir/.gitignore" ] || printf '*\n' >"$dir/.gitignore"
   conf_set_in "$target" "$1" "$2"
   repo_conf_resolved=0
 }
 
 repo_conf_unset() {
   local target
-  target="$(repo_conf)"
-  [ -n "$target" ] || return 0
+  target="$(repo_conf_target)" || return 0
+  [ -f "$target" ] || return 0
   { grep -v "^$1=" "$target" || true; } >"$target.tmp"
   mv "$target.tmp" "$target"
   repo_conf_resolved=0
@@ -939,6 +938,12 @@ require_task() {
   if task_exists "$id"; then
     task_id="$id"
     task_dir="$state_root/$id"
+    # The Task's own repo config decides its stall threshold, not the caller's:
+    # dispatch resolved it before task_dir was known. A flag or env value wins.
+    if [ -z "$stall_cli" ]; then
+      stall_threshold=""
+      resolve_stall_threshold
+    fi
     return 0
   fi
   if legacy_job_exists "$id"; then
@@ -1241,6 +1246,9 @@ do_config() {
     IFS=$'\x1f' read -r model_value model_src <<<"$(config_entry "$model_key")"
   fi
   IFS=$'\x1f' read -r research_value research_src <<<"$(config_entry "$research_model_key")"
+  # The runtime hands a researcher with no model of its own the worker's, so the
+  # report shows that value and where it came from.
+  if [ -z "$research_src" ]; then research_value="$model_value"; research_src="$model_src"; fi
   IFS=$'\x1f' read -r readonly_value readonly_src <<<"$(config_entry "$readonly_key" "$default_readonly_agents")"
   if [ -n "$stall_cli" ]; then stall_value="$stall_cli"; stall_src="flag"; else
     IFS=$'\x1f' read -r stall_value stall_src <<<"$(config_entry "$stall_key" "$default_stall_seconds")"
@@ -1273,9 +1281,9 @@ do_config() {
     --argjson warnings "$warnings_json" \
     '{($pk): {value: $pv, source: $ps},
       ($mk): {value: (if $ms == "" then null else $mv end),
-              source: (if $ms == "" then "default" else $ms end)},
+              source: (if $ms == "" then "unset" else $ms end)},
       ($rk): {value: (if $rs == "" then null else $rv end),
-              source: (if $rs == "" then "default" else $rs end)},
+              source: (if $rs == "" then "unset" else $rs end)},
       ($ok): {value: $ov, source: $os},
       ($sk): {value: $sv, source: $ss},
       ($tk): {value: $tv, source: $ts},
