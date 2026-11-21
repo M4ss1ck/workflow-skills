@@ -170,6 +170,177 @@ def shlex_like(path):
     return "'" + path.replace("'", "'\\''") + "'"
 
 
+class RepoConfig(Env):
+    """A repository's `.workflow-skills/subagents.conf` layers over the global
+    file, with the same lookup and precedence delegate.sh resolves."""
+
+    CONF = os.path.join(".workflow-skills", "subagents.conf")
+
+    def git(self, cwd, *argv):
+        return subprocess.run(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", *argv],
+                              capture_output=True, text=True, check=True)
+
+    def write(self, root, rel, text):
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def make_repo(self, name, files=None):
+        """A git repo with one commit, and the given files written into it."""
+        root = os.path.join(self.tmp, name)
+        os.makedirs(root)
+        self.git(root, "init", "-q")
+        self.write(root, "README", "repo\n")
+        self.git(root, "add", "README")
+        self.git(root, "commit", "-qm", "init")
+        for rel, text in (files or {}).items():
+            self.write(root, rel, text)
+        return root
+
+    def conf_path(self, root):
+        return os.path.join(os.path.realpath(root), self.CONF)
+
+    def global_conf(self, text):
+        path = routing.conf_file()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def delegate_config(self, cwd):
+        return subprocess.run([BASH, DELEGATE, "config", "--json"], capture_output=True, text=True,
+                              cwd=cwd, env=dict(os.environ, PATH=os.environ["PATH"]))
+
+    def parity(self, cwd):
+        """Both resolvers agree on the policy and the read-only patterns for CWD."""
+        out = self.delegate_config(cwd)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        sh = json.loads(out.stdout)
+        self.assertEqual(routing.read_policy(cwd), sh[routing.POLICY_KEY]["value"])
+        readonly, source = routing.conf_effective(routing.READONLY_KEY, cwd)
+        self.assertEqual(readonly if readonly is not None else routing.DEFAULT_READONLY_AGENTS,
+                         sh[routing.READONLY_KEY]["value"])
+        self.assertEqual(source or "default", sh[routing.READONLY_KEY]["source"])
+        self.assertEqual(routing.readonly_agents(cwd)[:len(routing.BUILTIN_READONLY_AGENTS)],
+                         list(routing.BUILTIN_READONLY_AGENTS))
+        return sh
+
+    def test_the_repo_file_overrides_the_global_one_per_key(self):
+        self.global_conf(f"{routing.POLICY_KEY}=auto\n{routing.READONLY_KEY}=x-*\n")
+        root = self.make_repo("repo", {self.CONF: f"{routing.POLICY_KEY}=off\n"})
+        sh = self.parity(root)
+        self.assertEqual(sh[routing.POLICY_KEY], {"value": "off", "source": self.conf_path(root)})
+        # a key the repo file leaves alone still comes from the global file
+        self.assertEqual(sh[routing.READONLY_KEY]["value"], "x-*")
+        self.assertEqual(routing.readonly_agents(root)[-1], "x-*")
+
+    def test_the_repo_readonly_patterns_report_value_and_source(self):
+        self.global_conf(f"{routing.POLICY_KEY}=auto\n{routing.READONLY_KEY}=global-reader\n")
+        root = self.make_repo("repo", {self.CONF: f"{routing.READONLY_KEY}=repo-*, scout\n"})
+        sh = self.parity(root)
+        self.assertEqual(sh[routing.READONLY_KEY], {"value": "repo-*, scout", "source": self.conf_path(root)})
+        value, source = routing.conf_effective(routing.READONLY_KEY, root)
+        self.assertEqual((value, source), ("repo-*, scout", self.conf_path(root)))
+        self.assertEqual(routing.readonly_agents(root)[-2:], ["repo-*", "scout"])
+
+    def test_the_repo_readonly_patterns_are_read_per_hook_cwd(self):
+        # One session, two repositories: the same agent type is exempt in A and
+        # routed in B, decided from the tool call's cwd.
+        self.global_conf(f"{routing.POLICY_KEY}=auto\n")
+        a = self.make_repo("repo a", {self.CONF: f"{routing.READONLY_KEY}=scout\n"})
+        b = self.make_repo("repo b", {self.CONF: f"{routing.READONLY_KEY}=\n"})
+        self.prompt("anything at all here")
+        tool_input = {"prompt": "look", "subagent_type": "scout"}
+        self.assertIsNone(self.call(cwd=a, tool_input=tool_input))
+        self.assertEqual(self.decision(self.call(cwd=b, tool_input=tool_input)), "deny")
+
+    def test_an_empty_repo_value_still_overrides(self):
+        self.global_conf(f"{routing.POLICY_KEY}=auto\n")
+        root = self.make_repo("repo", {self.CONF: f"{routing.POLICY_KEY}=\n"})
+        self.assertEqual(routing.read_policy(root), "explicit")
+        self.assertEqual(self.parity(root)[routing.POLICY_KEY]["value"], "explicit")
+
+    def test_the_nearest_file_from_a_subdirectory_wins(self):
+        self.global_conf(f"{routing.POLICY_KEY}=off\n")
+        root = self.make_repo("repo", {self.CONF: f"{routing.POLICY_KEY}=auto\n"})
+        sub = os.path.join(root, "pkg", "src")
+        self.write(root, os.path.join("pkg", self.CONF), f"{routing.POLICY_KEY}=explicit\n")
+        os.makedirs(sub)
+        sh = self.parity(sub)
+        self.assertEqual(sh[routing.POLICY_KEY], {"value": "explicit",
+                                                  "source": os.path.join(os.path.realpath(root), "pkg", self.CONF)})
+        self.assertEqual(routing.read_policy(root), "auto")
+
+    def test_an_invalid_repo_policy_names_its_file(self):
+        root = self.make_repo("repo", {self.CONF: f"{routing.POLICY_KEY}=sometimes\n"})
+        with self.assertRaisesRegex(routing.RoutingError, re.escape(self.conf_path(root))):
+            routing.read_policy(root)
+        out = self.delegate_config(root)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("invalid", out.stderr)
+
+    def test_a_linked_worktree_falls_back_to_the_main_worktree_file(self):
+        root = self.make_repo("main repo", {self.CONF: f"{routing.POLICY_KEY}=auto\n"})
+        wt = os.path.join(self.tmp, "linked wt")
+        self.git(root, "worktree", "add", "-q", "--detach", wt)
+        self.assertEqual(routing.read_policy(wt), "auto")
+        self.assertEqual(self.parity(wt)[routing.POLICY_KEY]["value"], "auto")
+        # a file of its own wins over the main worktree's
+        self.write(wt, self.CONF, f"{routing.POLICY_KEY}=off\n")
+        self.assertEqual(routing.read_policy(wt), "off")
+
+    def test_retention_stays_global_and_unknown_keys_are_ignored(self):
+        self.global_conf(f"{routing.POLICY_KEY}=explicit\n{routing.RETENTION_KEY}=30\n")
+        root = self.make_repo("repo", {self.CONF: f"{routing.POLICY_KEY}=auto\n{routing.RETENTION_KEY}=1\n"
+                                                   "OPENCODE_SUBAGENT_NOPE=1\n"})
+        sh = self.parity(root)
+        self.assertEqual(sh[routing.POLICY_KEY]["value"], "auto")
+        self.assertEqual(sh[routing.RETENTION_KEY]["value"], "30")
+        conf = self.conf_path(root)
+        self.assertEqual(routing.repo_conf_warnings(root), [
+            f"{conf}: {routing.RETENTION_KEY} is global only; ignored",
+            f"{conf}: unknown key OPENCODE_SUBAGENT_NOPE; ignored",
+        ])
+        self.assertEqual(routing.repo_conf_warnings(self.worktree), [])  # no repo, no file
+
+    def test_the_hook_resolves_the_policy_from_the_payload_cwd(self):
+        # One session, two repositories: the same native research call routes
+        # under each repository's policy, with no new user message.
+        roots = {policy: self.make_repo(f"repo {policy}", {self.CONF: f"{routing.POLICY_KEY}={policy}\n"})
+                 for policy in ("auto", "explicit")}
+        self.prompt("anything at all here")
+        reasons = {}
+        for policy, root in roots.items():
+            out = self.call(cwd=root)
+            self.assertEqual(self.decision(out), "deny")
+            reasons[policy] = out["hookSpecificOutput"]["permissionDecisionReason"]
+            self.assertIn(f"Under policy {policy}", reasons[policy])
+        self.assertIn("Under policy auto that routes implementation -> OpenCode worker", reasons["auto"])
+        self.assertIn("Under policy explicit, if nobody asked for delegation", reasons["explicit"])
+
+    def test_a_recorded_decision_uses_the_proposal_cwd_policy(self):
+        # The grant is checked against the hook's policy, so record must read the
+        # same repo config: the proposal's cwd, not wherever the CLI happens to run.
+        self.global_conf(f"{routing.POLICY_KEY}=auto\n")
+        root = self.make_repo("repo", {self.CONF: f"{routing.POLICY_KEY}=explicit\n"})
+        self.prompt("anything at all here")
+        result = self.record(self.proposal_of(self.call(cwd=root)), authorization="none", source_excerpt="")
+        self.assertEqual(result["route"], "local")
+
+    def test_doctor_reports_the_repo_file_warnings(self):
+        root = self.make_repo("repo", {self.CONF: f"{routing.RETENTION_KEY}=1\nOPENCODE_SUBAGENT_NOPE=1\n"})
+        old = os.getcwd()
+        os.chdir(root)
+        try:
+            report = routing.doctor(self.store, home=os.path.join(self.tmp, "home"))
+        finally:
+            os.chdir(old)
+        conf = self.conf_path(root)
+        self.assertEqual(report["warnings"], [f"{conf}: {routing.RETENTION_KEY} is global only; ignored",
+                                              f"{conf}: unknown key OPENCODE_SUBAGENT_NOPE; ignored"])
+
+
 class Decide(unittest.TestCase):
     """The policy precedence table, row by row."""
 

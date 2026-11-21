@@ -56,6 +56,8 @@ Required: known scope and decided architecture. Strongly preferred: success chec
 | `explicit` | Delegate only when the user or a calling workflow asks; their request is sufficient authorization. **Default.** |
 | `auto` | You may delegate eligible mechanical work unasked; say in one line what and why. |
 
+`opencode-delegate config` shows the effective config for the current directory and which file each value came from. A repo can override it in `.workflow-skills/subagents.conf`; edit that file only when the user asks.
+
 With the routing hooks installed, a native call that creates an agent or gives one more work is denied until you record a routing decision. The denial prints the command to run. Follow [references/routing.md](references/routing.md) for it; never retry in a loop or route around the hook.
 
 ## Research and review
