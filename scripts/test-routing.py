@@ -107,6 +107,13 @@ class Env(unittest.TestCase):
         self.assertIsNotNone(m, out)
         return m.group(1)
 
+    def audit_events(self, kind):
+        path = os.path.join(self.store.root, "audit.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            return [e for e in map(json.loads, f) if e["event"] == kind]
+
     def record(self, proposal, **fields):
         return routing.record_decision(record_args(proposal=proposal, **fields), self.store)
 
@@ -171,9 +178,11 @@ class Decide(unittest.TestCase):
         failed = dict(native_reason="opencode-failed", opencode_task="task_20261010-120000-1")
         rows = [
             # policy, record fields, prior assignment, excerpt epoch, expected route
-            ("off", dict(requested_provider="native"), None, 1, "none"),
-            ("off", dict(none), None, None, "none"),
-            ("off", dict(none, work_kind="review"), None, None, "none"),
+            # off disables OpenCode only: native subagents run ungated
+            ("off", dict(requested_provider="native"), None, 1, "native"),
+            ("off", dict(requested_provider="opencode"), None, 1, "native"),
+            ("off", dict(none), None, None, "native"),
+            ("off", dict(none, work_kind="review"), None, None, "native"),
             ("explicit", dict(none), None, None, "local"),
             ("explicit", dict(none, work_kind="research"), None, None, "local"),
             ("explicit", dict(none, work_kind="research", native_reason="needs-host-tools"), None, None, "local"),
@@ -208,7 +217,8 @@ class Decide(unittest.TestCase):
             # ...until a later explicit user override, or (research/review) a proven OpenCode failure
             ("auto", dict(requested_provider="native"), {"provider": "opencode", "epoch": 2}, 3, "native"),
             ("auto", dict(work_kind="review", **failed), {"provider": "opencode", "epoch": 2}, 1, "native"),
-            ("off", dict(requested_provider="native"), {"provider": "opencode", "epoch": 2}, 3, "none"),
+            ("off", dict(requested_provider="native"), {"provider": "opencode", "epoch": 2}, 3, "native"),
+            ("off", dict(requested_provider="opencode"), {"provider": "opencode", "epoch": 2}, 3, "native"),
             # a native assignment does not restrict later OpenCode use
             ("explicit", dict(requested_provider="opencode"), {"provider": "native", "epoch": 1}, 2, "opencode"),
         ]
@@ -317,8 +327,6 @@ class HookProtocol(Env):
     def test_every_denial_without_a_work_kind_forbids_self_review(self):
         self.prompt("anything at all here")
         outs = [self.call()]
-        self.set_policy("off")
-        outs.append(self.call())
         outs.append(self.call(session="never-prompted"))
         outs.append(routing.failure_output({"hook_event_name": "PreToolUse", "tool_name": "Agent"}, "boom"))
         for out in outs:
@@ -402,13 +410,24 @@ class HookProtocol(Env):
         self.assertEqual(self.decision(self.call()), "deny")
         self.assertEqual(routing.show(pid, self.store)["retired_reason"], "policy changed")
 
-    def test_policy_off_denies_without_proposal(self):
+    def test_policy_off_allows_every_native_call(self):
+        # Off disables OpenCode only: native creates, follow-ups and reviews run
+        # ungated, with no proposal and no grant.
         self.set_policy("off")
         self.prompt("use a native agent for the research please")
-        out = self.call()
-        self.assertEqual(self.decision(out), "deny")
-        self.assertIn("policy is off", out["hookSpecificOutput"]["permissionDecisionReason"])
+        creates = ({"prompt": "implement it", "subagent_type": "general-purpose"},
+                   {"prompt": "review the parser diff against the spec", "subagent_type": "general-purpose"})
+        for tool_input in creates:
+            with self.subTest(tool_input=tool_input):
+                self.assertIsNone(self.call(tool_input=tool_input))
+        for target in ("a47b8347f3aeb273e", "scout"):
+            with self.subTest(target=target):
+                out = self.call(tool="SendMessage", tool_input={"to": target, "message": "more"})
+                self.assertIsNone(out)
         self.assertEqual(routing.show(None, self.store)["open_proposals"], [])
+        allowed = self.audit_events("allow")
+        self.assertEqual([e["reason"] for e in allowed], ["policy_off"] * 4)
+        self.assertEqual(self.audit_events("deny"), [])
 
     def test_invalid_policy_denies(self):
         self.set_policy("sometimes")
@@ -985,10 +1004,7 @@ class ReadOnlyAgents(Env):
             with self.subTest(kind):
                 self.assertEqual(self.decision(self.call(tool_input={"prompt": "x", "subagent_type": kind})), "deny")
 
-    def test_not_under_policy_off_and_not_for_codex(self):
-        self.set_policy("off")
-        self.assertEqual(self.decision(self.call(tool_input={"prompt": "x", "subagent_type": "Explore"})), "deny")
-        self.set_policy("auto")
+    def test_not_for_codex(self):
         self.prompt("codex prompt goes here", session="cx", host_extra={"turn_id": "t1"})
         for tool in ("Agent", "spawn_agent"):  # Agent: only the host check stops it
             out = self.call(tool=tool, session="cx", tool_input={"message": "x", "subagent_type": "Explore"},
@@ -1018,13 +1034,6 @@ class ReadOnlyFollowUps(Env):
         response = ({"isAsync": True, "status": "async_launched", "agentId": agent_id, "description": "scan",
                      "prompt": "look", "canContinueAgent": True} if background else None)
         self.assertIsNone(self.post(tool_use_id, tool_input, agent_id, response=response))
-
-    def audit_events(self, kind):
-        path = os.path.join(self.store.root, "audit.jsonl")
-        if not os.path.exists(path):
-            return []
-        with open(path) as f:
-            return [e for e in map(json.loads, f) if e["event"] == kind]
 
     def test_a_follow_up_by_id_passes_after_a_background_launch(self):
         self.assertEqual(self.decision(self.by_id(AGENT_ID)), "deny")  # unknown before PostToolUse
@@ -1106,10 +1115,10 @@ class ReadOnlyFollowUps(Env):
                 self.assertEqual(self.decision(out), "deny")
                 self.proposal_of(out)
 
-    def test_policy_off_gates_follow_ups_too(self):
+    def test_policy_off_allows_follow_ups(self):
         self.launch()
         self.set_policy("off")
-        self.assertEqual(self.decision(self.by_id(AGENT_ID)), "deny")
+        self.assertIsNone(self.by_id(AGENT_ID))
 
     def test_duplicate_post_delivery_is_harmless(self):
         self.launch()
