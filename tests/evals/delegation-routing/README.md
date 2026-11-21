@@ -20,6 +20,8 @@ Grading is deterministic. Native starts come from the host's own counters, and d
 | `results/20260917-085708-claude.json` | final | 6 (control, policy off; 3 each) | 6/6 |
 | `results/20260929-073117-claude.json` | Claude Code 2.1.280, current v2 fixes | 6 (all scenarios; 1 each) | 6/6, 0 forbidden native starts in 4 critical runs |
 
+The results above predate ADR 0001: they graded policy `off` as 0 native starts. It now expects exactly one.
+
 What these runs do not show:
 
 - In the OpenCode-assignment, native-pressure and generic-delegation scenarios, the supervisor never tried a native call. That is compliant behavior, but in those scenarios the hook's denial was never exercised live. The deterministic suite covers that path.

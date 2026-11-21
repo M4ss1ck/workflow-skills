@@ -247,7 +247,7 @@ msg="$(run_delegate "$oc" --model x/y "task" 2>&1)"
 code=$?
 set -e
 [ "$code" -eq 2 ] || fail "opencode: policy off should exit 2, got $code"
-grep -q <<<"$msg" 'delegation is disabled' || fail "opencode: policy off lacks actionable error: $msg"
+grep -q <<<"$msg" 'OpenCode is disabled' || fail "opencode: policy off lacks actionable error: $msg"
 
 # an invalid policy is a config error, not a silent default
 echo 'OPENCODE_SUBAGENT_DELEGATION_POLICY=sometimes' >"$conf_file"

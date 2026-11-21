@@ -1115,10 +1115,11 @@ class ReadOnlyFollowUps(Env):
                 self.assertEqual(self.decision(out), "deny")
                 self.proposal_of(out)
 
-    def test_policy_off_allows_follow_ups(self):
-        self.launch()
+    def test_policy_off_skips_the_target_and_cwd_checks(self):
+        # Off disables OpenCode only: a call those checks would reject passes.
         self.set_policy("off")
-        self.assertIsNone(self.by_id(AGENT_ID))
+        self.assertIsNone(self.call(tool="SendMessage", tool_input={"message": "no target key"}))
+        self.assertIsNone(self.call(extra={"cwd": ""}))
 
     def test_duplicate_post_delivery_is_harmless(self):
         self.launch()

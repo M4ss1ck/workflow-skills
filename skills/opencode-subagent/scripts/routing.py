@@ -663,6 +663,14 @@ def pre_tool_use(payload, host, session, store):
         return seen["output"]
 
     policy = read_policy()
+    if policy == "off":
+        # Off disables OpenCode only: native subagents run ungated (ADR 0001).
+        # No decision rather than an allow, so the host's own permission rules
+        # still apply: they are where a user disables native subagents. It comes
+        # before the target and cwd checks so a call they would reject passes too.
+        store.audit(event="allow", session=key, tool=tool, reason="policy_off")
+        return None
+
     operation, target_field = WORK_TOOLS[tool]
     target = None
     if operation == "continue":
@@ -683,13 +691,6 @@ def pre_tool_use(payload, host, session, store):
         prune_session(session)
         store.save_session(session)
         return output
-
-    if policy == "off":
-        # Off disables OpenCode only: native subagents run ungated (ADR 0001).
-        # No decision rather than an allow, so the host's own permission rules
-        # still apply: they are where a user disables native subagents.
-        store.audit(event="allow", session=key, tool=tool, reason="policy_off")
-        return None
 
     # Read-only agent types run untouched: no proposal, no grant, nothing to
     # replay. This comes before grant matching, or an open grant for another

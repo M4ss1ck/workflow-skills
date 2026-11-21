@@ -48,7 +48,7 @@ Required: known scope and decided architecture. Strongly preferred: success chec
 
 ## Delegation policy
 
-`opencode-delegate policy` reports it; `opencode-delegate policy <value>` changes it. It governs OpenCode delegation and the native routing gate; `off` turns both off.
+`opencode-delegate policy` reports it; `opencode-delegate policy <value>` changes it. It governs OpenCode delegation and the native routing gate. `off` disables OpenCode and stops gating native calls.
 
 | Policy | Meaning |
 |---|---|

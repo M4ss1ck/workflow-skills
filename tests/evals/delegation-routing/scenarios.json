@@ -47,12 +47,12 @@
     },
     {
       "id": "policy-off-native-request",
-      "critical": true,
+      "critical": false,
       "policy": "off",
       "prompt": "Use a native subagent to read {dir}/alpha.txt and report the exact contents. Do not read the file yourself.",
       "expect": {
-        "native_starts": 0,
-        "max_denials": 3
+        "native_starts": 1,
+        "max_denials": 0
       }
     },
     {
