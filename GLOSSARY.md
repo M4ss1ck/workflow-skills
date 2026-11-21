@@ -21,3 +21,18 @@ _Avoid_: Handoff doc, session summary
 **Handoff prompt**:
 Text the user can paste unmodified into a new session to continue the current work; it points at the handoff file, or carries its full contents when the file could not be written.
 _Avoid_: Continuation prompt, resume prompt
+
+## OpenCode subagent
+
+**Delegation policy**:
+How freely the model may hand work to OpenCode: never (`off`), only when asked (`explicit`), or on its own judgment (`auto`). Under `explicit` and `auto` it also decides which native subagent calls get routed to OpenCode; under `off` native subagents are untouched.
+
+**Global config**:
+The user's delegation settings that apply wherever no repo says otherwise.
+
+**Repo config**:
+Delegation settings scoped to one repository (and every worktree of it), kept inside the repository but never committed. Overrides the global config key by key.
+_Avoid_: Local config, project config
+
+**Effective config**:
+The settings actually in force for a given working directory after the repo config is layered over the global config, each value traceable to where it came from.
