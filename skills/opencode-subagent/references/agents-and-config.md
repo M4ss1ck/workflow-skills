@@ -30,3 +30,13 @@ OPENCODE_SUBAGENT_RAW_RETENTION_DAYS=7
 ```
 
 `OPENCODE_SUBAGENT_MODEL` is the worker model. Resolution is: `--model` → configured worker model → **error**. The wrapper never falls back to whatever model OpenCode uses globally; inheriting a frontier model would defeat the purpose. Set it once with `--model provider/model --save-default`. `OPENCODE_SUBAGENT_RESEARCH_MODEL` is the researcher's model (`--role researcher --model ... --save-default` sets it); unset, the researcher uses the worker model. With no policy key the policy is `explicit`.
+
+A repository can layer its own file over the global one at `<repo>/.workflow-skills/subagents.conf`, in the same format:
+
+- The file is the nearest one between the working directory and the repository root, so a monorepo can configure a single package. A linked worktree with no file of its own uses the main worktree's file, at the same path from its root.
+- Precedence per key: the `--model`/`--stall-seconds` flag, then the repo file, then the global file, then the built-in default. An empty value in the repo file still overrides the global one.
+- `DELEGATION_POLICY`, `MODEL`, `RESEARCH_MODEL`, `READONLY_AGENTS` and `STALL_SECONDS` are overridable. `RETENTION_DAYS` and `RAW_RETENTION_DAYS` are global only, because the state store is: a repo file that sets one gets a warning in `config` and `route doctor`, and the key is ignored. An unknown key is warned about and ignored the same way.
+- An invalid policy value in either file is an error, naming the file.
+- `opencode-delegate config` prints the effective config for the current directory and the source of each value. `policy <value> --repo` and `--save-default --repo` write the repo file, creating the directory with a `.gitignore` of `*` so the repository never sees it; `opencode-delegate config --repo unset KEY` removes a key.
+- The trust model is the honor system, as for the global file: a repo file can loosen the policy (global `off`, repo `auto`). Check `opencode-delegate config` before trusting a repository you did not write.
+

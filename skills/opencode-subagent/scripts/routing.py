@@ -40,6 +40,11 @@ SCHEMA = 1
 POLICY_KEY = "OPENCODE_SUBAGENT_DELEGATION_POLICY"
 DEFAULT_POLICY = "explicit"
 POLICIES = ("off", "explicit", "auto")
+MODEL_KEY = "OPENCODE_SUBAGENT_MODEL"
+RESEARCH_MODEL_KEY = "OPENCODE_SUBAGENT_RESEARCH_MODEL"
+STALL_KEY = "OPENCODE_SUBAGENT_STALL_SECONDS"
+RETENTION_KEY = "OPENCODE_SUBAGENT_RETENTION_DAYS"
+RAW_RETENTION_KEY = "OPENCODE_SUBAGENT_RAW_RETENTION_DAYS"
 WORK_KINDS = ("implementation", "research", "review")
 AUTHORIZATIONS = ("user", "workflow", "none")
 PROVIDERS = ("opencode", "native", "unspecified")
@@ -53,6 +58,12 @@ NATIVE_REASONS = ("needs-host-tools", "opencode-failed")
 READONLY_KEY = "OPENCODE_SUBAGENT_READONLY_AGENTS"
 BUILTIN_READONLY_AGENTS = ("Explore", "Plan", "claude-code-guide")
 DEFAULT_READONLY_AGENTS = "*-reviewer *-explorer"
+# Keys a repo config may override, and keys it may not: retention stays global
+# because the state store is. Both match delegate.sh's conf_overridable.
+OVERRIDABLE_KEYS = (POLICY_KEY, MODEL_KEY, RESEARCH_MODEL_KEY, READONLY_KEY, STALL_KEY)
+GLOBAL_ONLY_KEYS = (RETENTION_KEY, RAW_RETENTION_KEY)
+# A repository's own config, shared with delegate.sh.
+REPO_CONF_REL = os.path.join(".workflow-skills", "subagents.conf")
 # Tools whose PostToolUse reports the id of an agent the hook exempted
 # (verified live: Claude Code 2.1.296 tool_response.agentId, foreground and
 # background). hooks/hooks.json registers PostToolUse for exactly these.
@@ -184,23 +195,118 @@ def conf_value(key, path=None):
     return value
 
 
-def read_policy(path=None):
-    """Same semantics as delegate.sh resolve_policy: empty or absent means
-    explicit, anything else is an error."""
-    path = path or conf_file()
-    value = conf_value(POLICY_KEY, path) or DEFAULT_POLICY
+def git_line(cwd, *argv):
+    """One git query, as delegate.sh runs it: the trimmed output, or None when
+    git is unavailable or answers with an error."""
+    try:
+        out = subprocess.run(["git", "-C", cwd, *argv], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def walk_up_conf(start, top):
+    """The nearest repo config from START up to TOP inclusive: the nearest file
+    wins, so a monorepo can configure one package."""
+    directory = start
+    while True:
+        path = os.path.join(directory, REPO_CONF_REL)
+        if os.path.isfile(path):
+            return path
+        if directory == top:
+            return None
+        parent = os.path.dirname(directory)
+        if parent == directory or not (parent == top or parent.startswith(top + os.sep)):
+            return None
+        directory = parent
+
+
+def repo_conf_file(cwd=None):
+    """The repo config that applies to CWD, as delegate.sh repo_conf_lookup finds
+    it: the nearest file between CWD and its worktree root, else the main
+    worktree's file at the same path from its root (a linked worktree with no
+    config of its own). None outside a work tree."""
+    cwd = os.path.realpath(cwd or os.getcwd())
+    top = git_line(cwd, "rev-parse", "--show-toplevel")
+    if not top:
+        return None
+    found = walk_up_conf(cwd, top)
+    if found:
+        return found
+    git_dir = git_line(cwd, "rev-parse", "--absolute-git-dir")
+    common = git_line(cwd, "rev-parse", "--git-common-dir")
+    if not git_dir or not common:
+        return None
+    common = os.path.realpath(os.path.join(cwd, common))
+    if common == os.path.realpath(git_dir):
+        return None
+    main_top = os.path.dirname(common)
+    rel = cwd[len(top):] if cwd.startswith(top + os.sep) else ""
+    start = main_top + rel
+    if not os.path.isdir(start):
+        start = main_top
+    return walk_up_conf(start, main_top)
+
+
+def conf_get_from(key, cwd=None):
+    """The file that supplies KEY: the repo config for an overridable key, then
+    the global config; None when neither sets it. Presence is what counts, so a
+    key set to an empty value in a repo file still overrides the global one."""
+    if key in OVERRIDABLE_KEYS:
+        repo = repo_conf_file(cwd)
+        if repo and conf_value(key, repo) is not None:
+            return repo
+    if conf_value(key) is not None:
+        return conf_file()
+    return None
+
+
+def conf_effective(key, cwd=None):
+    """(value, file) for KEY: the value verbatim (None when unset) and the file
+    it came from (None when unset)."""
+    source = conf_get_from(key, cwd)
+    return (conf_value(key, source) if source else None), source
+
+
+def read_policy(cwd=None):
+    """Same semantics as delegate.sh resolve_policy, from the config that applies
+    to CWD (default: this process's directory): empty or absent means explicit,
+    anything else is an error naming the file it came from."""
+    value, source = conf_effective(POLICY_KEY, cwd)
+    value = value or DEFAULT_POLICY
     if value not in POLICIES:
-        raise RoutingError(f"invalid {POLICY_KEY} in {path}: {value} (want off|explicit|auto)")
+        raise RoutingError(f"invalid {POLICY_KEY} in {source or conf_file()}: {value} (want off|explicit|auto)")
     return value
 
 
-def readonly_agents(path=None):
+def readonly_agents(cwd=None):
     """Patterns naming agent types that skip routing: the built-ins, plus the
-    configured patterns (absent means the default, empty means none)."""
-    value = conf_value(READONLY_KEY, path)
+    configured patterns for CWD (absent means the default, empty means none)."""
+    value, _ = conf_effective(READONLY_KEY, cwd)
     if value is None:
         value = DEFAULT_READONLY_AGENTS
     return list(BUILTIN_READONLY_AGENTS) + [p for p in re.split(r"[\s,]+", value) if p]
+
+
+def repo_conf_warnings(cwd=None):
+    """Keys in CWD's repo config that routing ignores, worded as
+    `opencode-delegate config` words them: retention is global only, anything
+    else is an unknown key."""
+    path = repo_conf_file(cwd)
+    if not path:
+        return []
+    warnings = []
+    with open(path, "rb") as f:
+        lines = f.read().decode("utf-8", "surrogateescape").split("\n")
+    for line in lines:
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key = line.split("=", 1)[0]
+        if key in OVERRIDABLE_KEYS:
+            continue
+        warnings.append(f"{path}: {key} is global only; ignored" if key in GLOBAL_ONLY_KEYS
+                        else f"{path}: unknown key {key}; ignored")
+    return warnings
 
 
 def is_readonly_agent(tool, operation, tool_input, patterns):
@@ -530,6 +636,13 @@ def canonical_cwd(cwd):
     return os.path.realpath(cwd) if cwd else ""
 
 
+def payload_cwd(payload):
+    """The payload's cwd, canonical, or "" when the payload has none usable: the
+    repo config is chosen by it, and a call without one is denied anyway."""
+    value = payload.get("cwd")
+    return canonical_cwd(value) if isinstance(value, str) and value else ""
+
+
 def input_digest(tool_input):
     return hashlib.sha256(json.dumps(tool_input, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -662,7 +775,10 @@ def pre_tool_use(payload, host, session, store):
         store.audit(event="duplicate_delivery", session=key, tool_use_id=tool_use_id, result=seen["output"]["hookSpecificOutput"]["permissionDecision"])
         return seen["output"]
 
-    policy = read_policy()
+    # The repo config is chosen by the payload cwd, so resolve it before the
+    # policy. A call with no usable cwd reads the process directory's config.
+    cwd = payload_cwd(payload)
+    policy = read_policy(cwd)
     if policy == "off":
         # Off disables OpenCode only: native subagents run ungated (ADR 0001).
         # No decision rather than an allow, so the host's own permission rules
@@ -670,7 +786,7 @@ def pre_tool_use(payload, host, session, store):
         # before the target and cwd checks so a call they would reject passes too.
         store.audit(event="allow", session=key, tool=tool, reason="policy_off")
         return None
-
+    readonly = readonly_agents(cwd)
     operation, target_field = WORK_TOOLS[tool]
     target = None
     if operation == "continue":
@@ -678,9 +794,8 @@ def pre_tool_use(payload, host, session, store):
         target = next((tool_input[f] for f in fields if isinstance(tool_input.get(f), str) and tool_input[f]), None)
         if target is None:
             raise RoutingError(f"{tool} call names no target agent")
-    if not isinstance(payload.get("cwd"), str) or not payload["cwd"]:
+    if not cwd:
         raise RoutingError(f"{tool} payload has no cwd, so the call cannot be bound to a worktree")
-    cwd = canonical_cwd(payload["cwd"])
     # Children run in the parent's session; a grant belongs to the agent that asked.
     agent = payload.get("agent_id") if isinstance(payload.get("agent_id"), str) else ""
     runtime = runtime_identity()
@@ -698,7 +813,7 @@ def pre_tool_use(payload, host, session, store):
     # Follow-up messages to a read-only agent pass too, by id: routing them
     # elsewhere would throw away the context it built. The id is remembered
     # only once the host ran the exempted call (post_tool_use).
-    exempt_create = is_readonly_agent(tool, operation, tool_input, readonly_agents())
+    exempt_create = is_readonly_agent(tool, operation, tool_input, readonly)
     session.pop("readonly_agents", None)  # names remembered before follow-ups went id-only
     if operation == "create" and not exempt_create:
         forget_readonly_id(session, tool_input.get("name"))
@@ -827,7 +942,7 @@ def post_tool_use(payload, host, store):
             agent_id = response.get("agentId")
             ran = response.get("agentType", tool_input.get("subagent_type"))
             # Re-check what ran: another PreToolUse hook may have rewritten the input.
-            if not (is_readonly_agent(tool, "create", tool_input, readonly_agents())
+            if not (is_readonly_agent(tool, "create", tool_input, readonly_agents(payload_cwd(payload)))
                     and ran == tool_input.get("subagent_type")):
                 store.audit(event="readonly_not_registered", session=key, tool_use_id=tool_use_id, reason="type changed")
                 store.save_session(session)
@@ -1039,10 +1154,11 @@ def record_decision(args, store=None):
     if record["skill_revision"] != revision:
         raise RoutingError(f"--skill-revision {record['skill_revision']} is not the current opencode-subagent skill "
                            f"revision ({revision}); reload the skill and follow its routing procedure")
-    policy = read_policy()
     runtime = runtime_identity()
     with store:
         session, proposal = find_proposal(store, record["proposal"])
+        # The policy that applies where the proposal was made, as the hook read it.
+        policy = read_policy(proposal.get("cwd") or os.getcwd())
         if proposal["status"] != "pending":
             raise RoutingError(f"proposal {proposal['id']} is already {proposal['status']}; repeat the native call to get a new proposal")
         if proposal["runtime"] != runtime:
@@ -1248,11 +1364,13 @@ def doctor(store=None, home=None):
         "runtime": {"path": self_path(), "identity": runtime_identity(), "python": sys.executable,
                     "python_version": ".".join(map(str, sys.version_info[:3]))},
         "skill_revision": skill_revision(), "conf_file": conf_file(), "state_dir": store.root, "problems": [],
+        "warnings": [],
     }
     try:
         report["policy"] = read_policy()
     except RoutingError as e:
         report["problems"].append(str(e))
+    report["warnings"].extend(repo_conf_warnings())
 
     command = shutil.which("opencode-delegate")
     cmd = {"path": command}
