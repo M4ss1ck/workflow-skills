@@ -76,7 +76,7 @@ process_identity_alive() {
 # Replace a file in one step. Refuses to install an empty payload so a failed
 # producer (jq erroring mid-pipeline) cannot truncate live state.
 write_atomic() {
-  local dest="$1" tmp="$1.tmp.$$"
+  local dest="$1" tmp="$1.tmp.${BASHPID:-$$}"
   cat >"$tmp"
   if [ ! -s "$tmp" ]; then rm -f "$tmp"; return 1; fi
   mv -f "$tmp" "$dest"
@@ -86,27 +86,60 @@ write_atomic() {
 # owner PID is published immediately, followed by a boot/process-start
 # fingerprint. A lock is reaped only when that owner is no longer the same live
 # process; elapsed wall time alone never breaks a lock with a published owner.
+
+# lock_instance DIR — what identifies one holder's lock: its PID and token.
+# Tokens are unique per acquisition, so a changed value means a new holder.
+lock_instance() {
+  printf '%s|%s\n' "$(cat "$1/owner.pid" 2>/dev/null || true)" "$(cat "$1/owner.token" 2>/dev/null || true)"
+}
+
+# lock_stale DIR — 0 when the holder is provably gone: its PID is dead, or the
+# PID was reused by another process, or it never published an owner in 30s.
+lock_stale() {
+  local dir="$1" owner age
+  owner="$(cat "$dir/owner.pid" 2>/dev/null || true)"
+  if [ -n "$owner" ]; then
+    kill -0 "$owner" 2>/dev/null || return 0
+    if [ -f "$dir/process.json" ] && ! process_identity_alive "$dir/process.json" "$owner"; then return 0; fi
+    return 1
+  fi
+  age="$(file_age_seconds "$dir")"
+  [ "$age" != "null" ] && [ "$age" -ge 30 ]
+}
+
+# lock_try_reap DIR — remove a stale lock without ever removing a live one.
+# Judging staleness and removing the directory are two steps. Between them the
+# observed holder can release, and a new holder's mkdir can land at the same
+# path; removing then would break the new holder's lock and let two processes
+# in. So reapers serialize on a guard directory and remove only when the
+# instance read before and after the staleness check is the same. A dead
+# holder cannot release, and other reapers are excluded, so an unchanged stale
+# instance stays put until the rm. A guard left by a reaper killed mid-reap
+# (it holds the guard for milliseconds) expires after 10 seconds.
+lock_try_reap() {
+  local dir="$1" guard="$1.reap" before age rc=1
+  if ! mkdir "$guard" 2>/dev/null; then
+    age="$(file_age_seconds "$guard")"
+    if [ "$age" != "null" ] && [ "$age" -ge 10 ]; then rm -rf "$guard" 2>/dev/null || true; fi
+    return 1
+  fi
+  before="$(lock_instance "$dir")"
+  if lock_stale "$dir" && [ "$(lock_instance "$dir")" = "$before" ]; then
+    rm -rf "$dir" 2>/dev/null || true
+    rc=0
+  fi
+  rmdir "$guard" 2>/dev/null || true
+  return "$rc"
+}
+
 lock_acquire() {
-  local dir="$1/.lock" owner age self="${BASHPID:-$$}"
+  local dir="$1/.lock" self="${BASHPID:-$$}"
   if [ -n "$lock_held" ]; then
     [ "$lock_held" = "$dir" ] || { echo "BUG: attempted to nest locks for different Tasks" >&2; return 1; }
     return 0
   fi
   while ! mkdir "$dir" 2>/dev/null; do
-    owner="$(cat "$dir/owner.pid" 2>/dev/null || true)"
-    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
-      if [ -f "$dir/process.json" ] && ! process_identity_alive "$dir/process.json" "$owner"; then
-        rm -rf "$dir" 2>/dev/null || true
-        continue
-      fi
-      sleep 0.1
-      continue
-    fi
-    age="$(file_age_seconds "$dir")"
-    if [ -n "$owner" ] || { [ "$age" != "null" ] && [ "$age" -ge 30 ]; }; then
-      rm -rf "$dir" 2>/dev/null || true
-      continue
-    fi
+    if lock_stale "$dir" && lock_try_reap "$dir"; then continue; fi
     sleep 0.1
   done
   lock_token="$self-$(now_epoch)-$RANDOM"
