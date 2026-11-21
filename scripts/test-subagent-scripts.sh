@@ -579,7 +579,11 @@ wait "$retry_a"
 wait "$retry_b"
 set -e
 codes="$(sort "$stub_dir/retry-a.code" "$stub_dir/retry-b.code" | tr '\n' ' ')"
-[ "$codes" = "0 2 " ] || fail "opencode: concurrent retries did not produce one winner (codes: $codes)"
+[ "$codes" = "0 2 " ] || fail "opencode: concurrent retries did not produce one winner (codes: $codes)
+--- retry A: $(cat "$stub_dir/retry-a.out")
+--- retry B: $(cat "$stub_dir/retry-b.out")
+--- events: $(jq -c '{seq, type, attempt, pid}' "$fd/events.jsonl" | tail -n 20)
+--- attempt_003 result: $(cat "$fd/attempts/attempt_003/result.json" 2>/dev/null)"
 jq -e '.attempt_count == 3 and .current_attempt == "attempt_003" and .state == "running"' "$fd/task.json" >/dev/null \
   || fail "opencode: concurrent retries corrupted Task state: $(cat "$fd/task.json")"
 [ "$(find "$fd/attempts" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 3 ] \
@@ -729,7 +733,7 @@ for i in {1..12}; do
 done
 wait
 jq -s -e '([.[].seq] == [range(1; length + 1)]) and ([.[].seq] | unique | length) == length' \
-  "$fd/events.jsonl" >/dev/null || fail "opencode: concurrent event append broke JSONL or event sequences"
+  "$fd/events.jsonl" >/dev/null || fail "opencode: concurrent event append broke JSONL or event sequences: $(jq -c .seq "$fd/events.jsonl" | tr '\n' ' ')"
 jq -s -e '[.[] | select(.type == "worker_done" and .attempt == "attempt_003")] | length == 1' \
   "$fd/events.jsonl" >/dev/null || fail "opencode: duplicate terminal event recorded for attempt_003"
 
