@@ -2,6 +2,9 @@
 # Validate the subagent delegate scripts against stubbed CLIs (no real API calls).
 set -euo pipefail
 
+# Per-call test overrides, never inherited from the host running the suite.
+unset TEST_XDG_CONFIG_HOME TEST_OPENCODE_CONFIG_DIR
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 stub_dir="$(mktemp -d)"
 trap 'rm -rf "$stub_dir"' EXIT
@@ -34,8 +37,8 @@ run_delegate() {
   STUB_LATE_FINAL="${STUB_LATE_FINAL:-0}" \
   STUB_STATUS="${STUB_STATUS:-DONE}" \
   XDG_STATE_HOME="$stub_dir/state" \
-  XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$stub_dir/config}" \
-  OPENCODE_CONFIG_DIR="${OPENCODE_CONFIG_DIR:-}" \
+  XDG_CONFIG_HOME="${TEST_XDG_CONFIG_HOME:-$stub_dir/config}" \
+  OPENCODE_CONFIG_DIR="${TEST_OPENCODE_CONFIG_DIR:-}" \
   DELEGATE_POLL_INTERVAL=1 \
   PATH="$stub_dir:$PATH" bash "$script" "$@"
 }
@@ -194,6 +197,16 @@ chmod +x "$stub_dir/opencode"
 
 oc="$repo_root/skills/opencode-subagent/scripts/delegate.sh"
 oc_agent="$stub_dir/config/opencode/agent/workflow-worker.md"
+
+# Ambient config paths must not leak into fixtures. Only explicit TEST_*
+# overrides may point a test at another sandbox directory.
+ambient_config="$stub_dir/ambient-config"
+mkdir -p "$ambient_config/workflow-skills"
+printf '%s\n' 'OPENCODE_SUBAGENT_MODEL=ambient/model' >"$ambient_config/workflow-skills/subagents.conf"
+out="$(XDG_CONFIG_HOME="$ambient_config" OPENCODE_CONFIG_DIR="$stub_dir/ambient-opencode" \
+  run_delegate "$oc" policy --json)"
+echo "$out" | jq -e --arg conf "$conf_file" '.conf_file == $conf and .worker_model == null' >/dev/null \
+  || fail "opencode: ambient config leaked into test fixtures: $out"
 
 # --- invocation through a symlink -------------------------------------------
 
@@ -495,7 +508,8 @@ grep -q '"type":"task_accepted"' "$td/events.jsonl" || fail "opencode: no task_a
 # Run after the main Task is closed so no other delegation is live in the tree.
 oc_agent_dir="$stub_dir/oc-agent-dir"
 xdg_agent_dir="$stub_dir/xdg-agent-dir"
-out="$(STUB_SLEEP=30 STUB_SESSION=ses_agentdir XDG_CONFIG_HOME="$xdg_agent_dir" OPENCODE_CONFIG_DIR="$oc_agent_dir" \
+out="$(STUB_SLEEP=30 STUB_SESSION=ses_agentdir \
+  TEST_XDG_CONFIG_HOME="$xdg_agent_dir" TEST_OPENCODE_CONFIG_DIR="$oc_agent_dir" \
   run_delegate "$oc" start --model stub/model "agent config dir")"
 agent_task="$(task_of "$out")"
 [ -n "$agent_task" ] || fail "opencode: agent config dir start printed no task id: $out"
