@@ -5,6 +5,6 @@ Claude Code, Codex and OpenCode all consume `SKILL.md`, but only Claude Code and
 ## Consequences
 
 - Editing the skill requires re-running `scripts/install.sh --agent opencode`; the generated command is a copy, not a symlink.
-- `scripts/test-install.sh` asserts exact body equality, the YAML shape, one `$ARGUMENTS`, no shell block, the XDG and `OPENCODE_CONFIG_DIR` paths, and the foreign-file guard.
+- `scripts/test-install.sh` asserts exact body equality, the YAML shape, no unexpected `$` expansion, no shell block, the XDG and `OPENCODE_CONFIG_DIR` paths, and the foreign-file guard.
 - A description the installer cannot copy as valid YAML stops the install instead of leaving a stale command behind.
 - `delegate.sh` resolves the agent directory with the same config ladder, covered by `scripts/test-subagent-scripts.sh`.

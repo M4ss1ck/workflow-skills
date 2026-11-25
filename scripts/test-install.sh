@@ -68,16 +68,14 @@ if set(data) != {"description"}:
 PY
 fi
 # OpenCode expands $ and runs !`command` blocks in a command body. The body is
-# copied verbatim, so guard that it carries exactly the $ARGUMENTS token.
-[ "$(grep -o '\$' "$orchestrate_cmd" | wc -l | tr -d ' ')" -eq 1 ] \
+# copied verbatim from the skill, so guard that it carries no expansion tokens.
+[ "$(grep -o '\$' "$orchestrate_cmd" | wc -l | tr -d ' ')" -eq 0 ] \
   || { echo "FAIL  $orchestrate_cmd has an unexpected dollar expansion" >&2; exit 1; }
 if grep -q '^!' "$orchestrate_cmd"; then
   echo "FAIL  $orchestrate_cmd has a shell block that OpenCode would execute" >&2
   exit 1
 fi
-grep -q '^The request: \$ARGUMENTS$' "$orchestrate_cmd" \
-  || { echo "FAIL  $orchestrate_cmd lost the single-source body" >&2; exit 1; }
-grep -q 'One packet is one committable unit' "$orchestrate_cmd" \
+grep -q 'One packet = one committable unit' "$orchestrate_cmd" \
   || { echo "FAIL  $orchestrate_cmd is missing the skill body" >&2; exit 1; }
 # the body is generated, not retyped: compare it to the skill's body exactly
 skill_body="$(awk 'NR==1 && $0=="---" { in_fm=1; next } in_fm && $0=="---" { in_fm=0; next } !in_fm' \
