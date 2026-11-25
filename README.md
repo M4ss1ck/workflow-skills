@@ -12,6 +12,7 @@ The `skills/` directory is the source of truth and follows the open `SKILL.md` l
 | [keep-plans-local](skills/keep-plans-local/SKILL.md) | Keeps plans, specs, and working notes as disposable local-only guidance under `docs/plans/`, out of git — overriding skills that would commit them. |
 | [follow-plan](skills/follow-plan/SKILL.md) | Executes provided plans exactly, stopping for unresolved decisions instead of improvising or silently deviating. |
 | [opencode-subagent](skills/opencode-subagent/SKILL.md) | Delegate bounded, mechanically verifiable implementation work to a constrained OpenCode worker running a cheap model, then verify the result independently. Requires OpenCode 2.x (1.x is no longer supported). |
+| [orchestrate](skills/orchestrate/SKILL.md) | `/orchestrate <issue or brief>` runs the whole delegation loop: fetch the ticket, branch, one verified packet per committable unit, commit and push as it lands, then a PR. |
 | [propose-commit-message](skills/propose-commit-message/SKILL.md) | Proposes a Conventional Commits message for the current work (staged changes if any) without committing. Pairs with report-changes at the end of a task. |
 | [context-watch](skills/context-watch/SKILL.md) | Reports how large the current Claude Code session's context is. Its companion hook warns once the context passes 200k and 400k tokens (see [Context watch](#context-watch)). |
 
@@ -59,11 +60,12 @@ cd workflow-skills
 scripts/install.sh                  # ~/.claude/skills (default)
 scripts/install.sh --agent codex    # ~/.agents/skills and ~/.codex/skills
 scripts/install.sh --agent gemini   # ~/.gemini/skills
-scripts/install.sh --agent opencode # ~/.config/opencode/skills (+ agent definitions)
+scripts/install.sh --agent opencode # OpenCode config dir: skills, agents, /orchestrate
 scripts/install.sh --all            # every known target
 scripts/install.sh --copy           # copy instead of symlink
 scripts/install.sh --dir PATH       # custom skills directory
 scripts/install.sh --list-agents
+scripts/install.sh --doctor         # check CLIs, the worker, /orchestrate, and routing
 scripts/install.sh --no-hooks       # skip every hook (delegation routing and context-watch)
 scripts/install.sh --no-context-watch               # skip only the context-watch hook
 scripts/install.sh --remove-hooks --agent claude   # remove only the hooks it added
@@ -71,6 +73,12 @@ scripts/install.sh --remove-context-watch          # remove only the context-wat
 ```
 
 `--copy` installs one self-contained `opencode-subagent` runtime under `${XDG_DATA_HOME:-~/.local/share}/workflow-skills/`, so the `opencode-delegate` command and the hooks keep working after the clone is moved or deleted. Symlink mode runs the clone directly.
+
+## Slash commands
+
+The skill is the portable core: Claude Code loads `skills/<name>/SKILL.md` and exposes it as `/<name>`, and Codex loads the same skill and invokes it as `$orchestrate` or through `/skills`. The Claude Code plugin namespaces it as `/workflow-skills:orchestrate`.
+
+OpenCode keeps commands in a registry separate from skills, so `scripts/install.sh --agent opencode` also writes `orchestrate.md` under OpenCode's config directory (`OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`). It is generated from `skills/orchestrate/SKILL.md` with OpenCode frontmatter and the same body, so the body has one source. It is a generated copy, not a symlink: re-run the installer after editing the skill. The installer refuses to overwrite a command file it did not generate. Codex custom slash prompts are deprecated and live only under `~/.codex/prompts`, so this repo does not ship one.
 
 ## Native delegation routing
 

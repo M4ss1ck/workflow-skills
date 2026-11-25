@@ -34,7 +34,8 @@ run_delegate() {
   STUB_LATE_FINAL="${STUB_LATE_FINAL:-0}" \
   STUB_STATUS="${STUB_STATUS:-DONE}" \
   XDG_STATE_HOME="$stub_dir/state" \
-  XDG_CONFIG_HOME="$stub_dir/config" \
+  XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$stub_dir/config}" \
+  OPENCODE_CONFIG_DIR="${OPENCODE_CONFIG_DIR:-}" \
   DELEGATE_POLL_INTERVAL=1 \
   PATH="$stub_dir:$PATH" bash "$script" "$@"
 }
@@ -489,6 +490,20 @@ run_delegate "$oc" decide "$task" accept --reason "diff matches the spec" >/dev/
 jq -e '.state == "accepted" and .outcome.supervisor == "accepted"' "$td/task.json" >/dev/null \
   || fail "opencode: accept did not close the task"
 grep -q '"type":"task_accepted"' "$td/events.jsonl" || fail "opencode: no task_accepted event"
+
+# OPENCODE_CONFIG_DIR wins over XDG for the agent definition, matching OpenCode.
+# Run after the main Task is closed so no other delegation is live in the tree.
+oc_agent_dir="$stub_dir/oc-agent-dir"
+xdg_agent_dir="$stub_dir/xdg-agent-dir"
+out="$(STUB_SLEEP=30 STUB_SESSION=ses_agentdir XDG_CONFIG_HOME="$xdg_agent_dir" OPENCODE_CONFIG_DIR="$oc_agent_dir" \
+  run_delegate "$oc" start --model stub/model "agent config dir")"
+agent_task="$(task_of "$out")"
+[ -n "$agent_task" ] || fail "opencode: agent config dir start printed no task id: $out"
+[ -f "$oc_agent_dir/agent/workflow-worker.md" ] \
+  || fail "opencode: worker agent ignored OPENCODE_CONFIG_DIR"
+[ ! -e "$xdg_agent_dir/opencode/agent/workflow-worker.md" ] \
+  || fail "opencode: worker agent written under XDG despite OPENCODE_CONFIG_DIR"
+run_delegate "$oc" cancel "$agent_task" >/dev/null 2>&1 || true
 
 # an accepted task refuses further attempts rather than silently reopening
 set +e

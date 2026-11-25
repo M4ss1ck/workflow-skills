@@ -92,7 +92,11 @@ while [ -L "$self_path" ]; do
 done
 self_path="$(cd "$(dirname "$self_path")" && pwd)/$(basename "$self_path")"
 skill_dir="$(cd "$(dirname "$self_path")/.." && pwd)"
-agent_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent"
+if [ -n "${OPENCODE_CONFIG_DIR:-}" ]; then
+  agent_dir="$OPENCODE_CONFIG_DIR/agent"
+else
+  agent_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent"
+fi
 watch_filter='.part.text? // empty'
 
 model=""
@@ -448,7 +452,8 @@ resolve_model() {
 
 # OpenCode 2.x refuses an unknown --agent outright (1.x silently fell back to
 # its unconstrained default agent), so the definition has to be on disk before
-# we launch. 2.x still reads agents from ~/.config/opencode/agent/.
+# we launch. OpenCode reads agents from its global config dir: OPENCODE_CONFIG_DIR
+# when set, else XDG_CONFIG_HOME/opencode, else ~/.config/opencode.
 ensure_agent() {
   local agent_src="$skill_dir/agents/$agent_name.md" agent_dest="$agent_dir/$agent_name.md"
   [ -f "$agent_src" ] || die "worker agent definition missing: $agent_src"
