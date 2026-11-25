@@ -40,6 +40,112 @@ worker="$tmp_home/.config/opencode/agent/workflow-worker.md"
 grep -q '^name: workflow-worker$' "$worker" \
   || { echo "FAIL  $worker is not the worker agent definition" >&2; exit 1; }
 
+# OpenCode commands are a separate registry from skills, so the opencode target
+# must materialize /orchestrate from the skill body with OpenCode frontmatter.
+orchestrate_cmd="$tmp_home/.config/opencode/commands/orchestrate.md"
+[ -f "$orchestrate_cmd" ] || { echo "FAIL  expected $orchestrate_cmd" >&2; exit 1; }
+grep -q '^description: .' "$orchestrate_cmd" \
+  || { echo "FAIL  $orchestrate_cmd has no description" >&2; exit 1; }
+# the generated frontmatter is YAML: one description line and two delimiters,
+# with the description kept as the quoted scalar the skill declares
+[ "$(sed -n '1p' "$orchestrate_cmd")" = "---" ] \
+  || { echo "FAIL  $orchestrate_cmd does not start with frontmatter" >&2; exit 1; }
+[ "$(sed -n '4p' "$orchestrate_cmd")" = "---" ] \
+  || { echo "FAIL  $orchestrate_cmd frontmatter is not three lines" >&2; exit 1; }
+sed -n '3p' "$orchestrate_cmd" | grep -q "^description: '.*'$" \
+  || { echo "FAIL  $orchestrate_cmd description is not a quoted scalar" >&2; exit 1; }
+[ "$(grep -c '^description:' "$orchestrate_cmd")" -eq 1 ] \
+  || { echo "FAIL  $orchestrate_cmd has more than one description" >&2; exit 1; }
+# a conditional real parse: the shell checks prove shape, not YAML semantics
+if python3 -c 'import yaml' >/dev/null 2>&1; then
+  python3 - "$orchestrate_cmd" <<'PY'
+import sys, yaml
+text = open(sys.argv[1]).read()
+frontmatter = text.split("---", 2)[1]
+data = yaml.safe_load(frontmatter)
+if set(data) != {"description"}:
+    raise SystemExit(f"unexpected frontmatter keys: {sorted(data)}")
+PY
+fi
+# OpenCode expands $ and runs !`command` blocks in a command body. The body is
+# copied verbatim from the skill, so guard that it carries no expansion tokens.
+[ "$(grep -o '\$' "$orchestrate_cmd" | wc -l | tr -d ' ')" -eq 0 ] \
+  || { echo "FAIL  $orchestrate_cmd has an unexpected dollar expansion" >&2; exit 1; }
+if grep -q '^!' "$orchestrate_cmd"; then
+  echo "FAIL  $orchestrate_cmd has a shell block that OpenCode would execute" >&2
+  exit 1
+fi
+grep -q 'One packet = one committable unit' "$orchestrate_cmd" \
+  || { echo "FAIL  $orchestrate_cmd is missing the skill body" >&2; exit 1; }
+# the body is generated, not retyped: compare it to the skill's body exactly
+skill_body="$(awk 'NR==1 && $0=="---" { in_fm=1; next } in_fm && $0=="---" { in_fm=0; next } !in_fm' \
+  "$repo_root/skills/orchestrate/SKILL.md" | sed '/./,$!d')"
+command_body="$(awk 'NR==1 && $0=="---" { in_fm=1; next } in_fm && $0=="---" { in_fm=0; next } !in_fm' \
+  "$orchestrate_cmd" | sed '/./,$!d')"
+[ "$skill_body" = "$command_body" ] \
+  || { echo "FAIL  $orchestrate_cmd body drifted from skills/orchestrate/SKILL.md" >&2; exit 1; }
+if grep -q '^name: orchestrate$' "$orchestrate_cmd"; then
+  echo "FAIL  $orchestrate_cmd kept skill-only frontmatter" >&2
+  exit 1
+fi
+# rewriting on rerun keeps one frontmatter block and the marker
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent opencode >/dev/null
+[ "$(sed -n '1p' "$orchestrate_cmd")" = "---" ] && [ "$(sed -n '4p' "$orchestrate_cmd")" = "---" ] \
+  || { echo "FAIL  $orchestrate_cmd frontmatter duplicated on rerun" >&2; exit 1; }
+
+# a user-authored command with our name must survive an install untouched
+foreign_home="$tmp_root/foreign home"
+mkdir -p "$foreign_home/.config/opencode/commands"
+printf 'user command\n' >"$foreign_home/.config/opencode/commands/orchestrate.md"
+out="$(HOME="$foreign_home" XDG_CONFIG_HOME="$foreign_home/.config" XDG_DATA_HOME="$foreign_home/.local/share" XDG_STATE_HOME="$foreign_home/.local/state" \
+  "$repo_root/scripts/install.sh" --agent opencode --no-hooks 2>&1)"
+[ "$(cat "$foreign_home/.config/opencode/commands/orchestrate.md")" = "user command" ] \
+  || { echo "FAIL  install overwrote a user-authored orchestrate command" >&2; exit 1; }
+echo "$out" | grep -q 'NOT installed' \
+  || { echo "FAIL  install did not announce the foreign command" >&2; exit 1; }
+
+# OpenCode resolves its global config through XDG_CONFIG_HOME; every path the
+# installer writes for it must follow that root, not a hardcoded ~/.config.
+xdg_home="$tmp_root/xdg home"
+xdg_config="$tmp_root/xdg config"
+mkdir -p "$xdg_home"
+HOME="$xdg_home" XDG_CONFIG_HOME="$xdg_config" XDG_DATA_HOME="$xdg_home/.local/share" XDG_STATE_HOME="$xdg_home/.local/state" \
+  "$repo_root/scripts/install.sh" --agent opencode --no-hooks >/dev/null
+[ -f "$xdg_config/opencode/commands/orchestrate.md" ] \
+  || { echo "FAIL  OpenCode command ignored XDG_CONFIG_HOME" >&2; exit 1; }
+[ -f "$xdg_config/opencode/skills/report-changes/SKILL.md" ] \
+  || { echo "FAIL  OpenCode skills ignored XDG_CONFIG_HOME" >&2; exit 1; }
+[ -f "$xdg_config/opencode/agent/workflow-worker.md" ] \
+  || { echo "FAIL  OpenCode agents ignored XDG_CONFIG_HOME" >&2; exit 1; }
+if [ -e "$xdg_home/.config/opencode" ]; then
+  echo "FAIL  installer wrote OpenCode files under HOME/.config despite XDG_CONFIG_HOME" >&2
+  exit 1
+fi
+
+# the permission file and --doctor follow the same root as the rest
+HOME="$xdg_home" XDG_CONFIG_HOME="$xdg_config" XDG_DATA_HOME="$xdg_home/.local/share" XDG_STATE_HOME="$xdg_home/.local/state" \
+  "$repo_root/scripts/install.sh" --agent opencode --subagent-permissions --no-hooks >/dev/null
+[ -f "$xdg_config/opencode/opencode.json" ] \
+  || { echo "FAIL  OpenCode permissions ignored XDG_CONFIG_HOME" >&2; exit 1; }
+out="$(HOME="$xdg_home" XDG_CONFIG_HOME="$xdg_config" XDG_DATA_HOME="$xdg_home/.local/share" XDG_STATE_HOME="$xdg_home/.local/state" \
+  "$repo_root/scripts/install.sh" --doctor)"
+echo "$out" | grep -Fq "$xdg_config/opencode/commands/orchestrate.md" \
+  || { echo "FAIL  --doctor looked for the command outside XDG_CONFIG_HOME" >&2; exit 1; }
+
+# OPENCODE_CONFIG_DIR wins over XDG_CONFIG_HOME, as OpenCode does
+oc_dir="$tmp_root/custom oc"
+oc_xdg="$tmp_root/oc xdg"
+HOME="$xdg_home" XDG_CONFIG_HOME="$oc_xdg" OPENCODE_CONFIG_DIR="$oc_dir" XDG_DATA_HOME="$xdg_home/.local/share" XDG_STATE_HOME="$xdg_home/.local/state" \
+  "$repo_root/scripts/install.sh" --agent opencode --no-hooks >/dev/null
+[ -f "$oc_dir/commands/orchestrate.md" ] \
+  || { echo "FAIL  OpenCode command ignored OPENCODE_CONFIG_DIR" >&2; exit 1; }
+[ -f "$oc_dir/skills/report-changes/SKILL.md" ] \
+  || { echo "FAIL  OpenCode skills ignored OPENCODE_CONFIG_DIR" >&2; exit 1; }
+if [ -e "$oc_xdg/opencode" ]; then
+  echo "FAIL  installer wrote under XDG_CONFIG_HOME despite OPENCODE_CONFIG_DIR" >&2
+  exit 1
+fi
+
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent gemini >/dev/null
 assert_skill_installed "$tmp_home/.gemini/skills" report-changes
 
@@ -54,6 +160,13 @@ assert_skill_installed "$tmp_home/.config/opencode/skills" report-changes
 HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent codex --copy >/dev/null
 if [ -L "$tmp_home/.agents/skills/report-changes" ]; then
   echo "FAIL  --copy created a symlink" >&2
+  exit 1
+fi
+
+HOME="$tmp_home" "$repo_root/scripts/install.sh" --agent opencode --copy >/dev/null
+[ -f "$orchestrate_cmd" ] || { echo "FAIL  --copy removed $orchestrate_cmd" >&2; exit 1; }
+if [ -L "$orchestrate_cmd" ]; then
+  echo "FAIL  --copy turned the generated command into a symlink" >&2
   exit 1
 fi
 
@@ -115,6 +228,7 @@ fi
 # --doctor reports the worker agent install state
 out="$(HOME="$tmp_home" "$repo_root/scripts/install.sh" --doctor)"
 echo "$out" | grep -q 'worker' || { echo "FAIL  --doctor missing worker agent line" >&2; exit 1; }
+echo "$out" | grep -q 'orchestrate' || { echo "FAIL  --doctor missing orchestrate command line" >&2; exit 1; }
 
 # --doctor reports on the three CLIs and jq
 out="$("$repo_root/scripts/install.sh" --doctor)"

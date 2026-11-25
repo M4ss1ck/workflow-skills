@@ -18,13 +18,14 @@
   "interface": {
     "displayName": "Workflow Skills",
     "shortDescription": "Personal workflow skills for coding agents.",
-    "longDescription": "Reusable skills for reporting changes, keeping plans local, and proposing commit messages across agent coding workflows.",
+    "longDescription": "Reusable skills for delegating an issue to OpenCode, reporting changes, keeping plans local, and proposing commit messages across agent coding workflows.",
     "developerName": "massick",
     "category": "Productivity",
     "capabilities": [
       "Write"
     ],
     "defaultPrompt": [
+      "Orchestrate this issue through OpenCode.",
       "Report the changes from this session.",
       "Propose a commit message.",
       "Keep this implementation plan local."
